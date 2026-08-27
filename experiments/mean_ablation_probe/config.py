@@ -6,7 +6,7 @@ mean-ablating a sliding window of attention or MLP blocks and re-probing.
 
 from pathlib import Path
 
-from experiments.self_user_geometry.config import DEVICE, MODEL_NAME  # noqa: F401
+from core.config import DEVICE, MODEL_NAME  # noqa: F401
 
 # The dataset is the speaker-probe dataset, verbatim: same builder, same seed,
 # same shared sentence pool. Only the sampling density differs (see below).

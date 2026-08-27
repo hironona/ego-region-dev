@@ -51,14 +51,23 @@ def conditions(n_layers, size, components):
     return out
 
 
-def capture_condition(m, tokenizer, device, conversations, interventions, tokens_per_turn):
-    """Run every conversation under one intervention set. Returns arrays dict."""
+def capture_condition(
+    m, tokenizer, device, conversations, interventions, tokens_per_turn, layers=None
+):
+    """Run every conversation under one intervention set. Returns arrays dict.
+
+    `layers` keeps only those residual-stream readout points (indices into the
+    L+1 hidden_states axis). None keeps all of them; a subset is how a sweep with
+    many conditions stays inside a sane disk budget.
+    """
     X_rows, speaker_rows, turn_rows, conv_rows = [], [], [], []
     for ci, messages in enumerate(conversations):
         _, input_ids, spans = build_input(tokenizer, messages)
         hidden = capture.run(
             m, input_ids, device, what=("hidden_states",), interventions=interventions
         )["hidden_states"]  # (L+1, T, D)
+        if layers is not None:
+            hidden = hidden[list(layers)]
         for mi, (start, end) in enumerate(spans):
             for pos in evenly_spaced_positions(start, end, tokens_per_turn):
                 X_rows.append(hidden[:, pos, :].astype(np.float16))

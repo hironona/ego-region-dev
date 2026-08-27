@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from experiments.self_user_geometry.config import MODEL_NAME, DEVICE  # noqa: F401
+from core.config import MODEL_NAME, DEVICE  # noqa: F401
 
 N_CONVERSATIONS = 100
 N_TURNS = 10

@@ -7,34 +7,11 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from core import capture
-from experiments.self_user_geometry import config
-from experiments.self_user_geometry.analyze import normalize_per_layer
-from experiments.self_user_geometry.run_capture import (
-    build_input,
-    find_role_token_positions,
-)
+from core import capture, config
+from experiments.speaker_probe.run_capture import build_input
 
-
-def test_role_positions():
-    tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
-    _, ids = build_input(tok, "Hi", system="You are helpful.")
-    pos = find_role_token_positions(tok, ids)
-    assert set(pos) == {"system", "user", "assistant"}, pos
-    for role, positions in pos.items():
-        for p in positions:
-            assert tok.decode([ids[0, p].item()]).strip() == role
-            # the role token must sit directly after a turn start
-            assert ids[0, p - 1].item() == tok.convert_tokens_to_ids("<|im_start|>")
-
-
-def test_normalize_per_layer():
-    rng = np.random.default_rng(0)
-    x = rng.normal(size=(4, 7, 5)) * np.array([1.0, 10, 100, 1000])[:, None, None]
-    y = normalize_per_layer(x)
-    assert np.allclose(y.mean(axis=1), 0, atol=1e-9)
-    # every layer ends up at the same scale, which is the whole point
-    assert np.allclose((y**2).sum(-1).mean(axis=1), 1.0)
+# test_role_positions and test_normalize_per_layer used to live here; both
+# covered code in experiments/self_user_geometry, which is gone.
 
 
 def test_save_load_roundtrip(tmp="/tmp/ego_region_test/cap.npz"):
@@ -66,8 +43,6 @@ def test_qwen3_injects_think_into_history():
 
 
 def test_speaker_probe_input_is_think_free_and_aligned():
-    from experiments.speaker_probe.run_capture import build_input
-
     tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
     msgs = [
         {"role": "user", "content": "U1"},
@@ -178,12 +153,55 @@ def test_mean_ablation_freezes_the_window_and_nothing_before_it():
     assert sorted(covered) == list(range(28)), covered
 
 
+def test_head_ablation_matches_layer_ablation():
+    """Freezing all of a layer's heads (hook_z) must equal freezing its attn_out.
+
+    W_O is linear, so the two edits are the same edit. This is what licenses
+    comparing a head-sweep number against a window-sweep number; if it ever
+    fails, the two experiments are measuring different interventions.
+    """
+    from core import model as model_mod
+    from experiments.head_ablation_sweep.run_capture import Z_HOOK, conditions, mean_ablate_heads
+    from experiments.mean_ablation_probe.run_capture import mean_over_context
+
+    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    ids = tok(
+        "<|im_start|>user\nhello there friend how are you<|im_end|>\n",
+        add_special_tokens=False,
+        return_tensors="pt",
+    )["input_ids"]
+
+    layer = 2
+    by_head = capture.run(
+        m, ids, device, what=("hidden_states",),
+        interventions=[(Z_HOOK.format(layer=layer), mean_ablate_heads(range(m.cfg.n_heads)))],
+    )["hidden_states"]
+    by_layer = capture.run(
+        m, ids, device, what=("hidden_states",),
+        interventions=[(f"blocks.{layer}.hook_attn_out", mean_over_context)],
+    )["hidden_states"]
+    base = capture.run(m, ids, device, what=("hidden_states",))["hidden_states"]
+
+    assert np.allclose(by_head, by_layer, atol=1e-2), np.abs(by_head - by_layer).max()
+    assert not np.allclose(by_head, base), "ablation was a no-op"
+
+    one_head = capture.run(
+        m, ids, device, what=("hidden_states",),
+        interventions=[(Z_HOOK.format(layer=layer), mean_ablate_heads([3]))],
+    )["hidden_states"]
+    assert not np.allclose(one_head, base)
+    assert np.abs(one_head - base).max() < np.abs(by_head - base).max()
+
+    names = [n for n, _ in conditions((0, 1, 2, 3, 4), m.cfg.n_heads)]
+    assert len(names) == 1 + 5 * m.cfg.n_heads + 5 + 1, len(names)
+
+
 def test_capture_shapes():
     """Hooked value vectors must line up with the layers and tokens they came from."""
     from core import model as model_mod
 
     m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
-    _, ids = build_input(tok, "Hi", None)
+    _, ids, _ = build_input(tok, [{"role": "user", "content": "Hi"}])
     a = capture.run(m, ids, device)
     n_layers, t = m.cfg.n_layers, ids.shape[1]
     assert a["hidden_states"].shape == (n_layers + 1, t, m.cfg.d_model)
