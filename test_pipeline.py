@@ -7,11 +7,12 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from core import capture, config
+from core import capture
+from experiments.speaker_probe import config
 from experiments.speaker_probe.run_capture import build_input
 
-# test_role_positions and test_normalize_per_layer used to live here; both
-# covered code in experiments/self_user_geometry, which is gone.
+# Each experiment owns its config; these checks are model-level, so they read
+# speaker_probe's copy as the representative one.
 
 
 def test_save_load_roundtrip(tmp="/tmp/ego_region_test/cap.npz"):
@@ -194,6 +195,85 @@ def test_head_ablation_matches_layer_ablation():
 
     names = [n for n, _ in conditions((0, 1, 2, 3, 4), m.cfg.n_heads)]
     assert len(names) == 1 + 5 * m.cfg.n_heads + 5 + 1, len(names)
+
+
+def test_generation_prompt_is_clean_without_enable_thinking():
+    """Counter-intuitive and easy to get backwards: on this template
+    `enable_thinking=False` ADDS an empty `<think></think>` block to the
+    generation prompt (it suppresses thinking by pre-closing it), and the plain
+    default is the think-free one. steering_boundary.prompt_ids relies on that.
+    """
+    from experiments.steering_boundary.run_capture import prompt_ids
+
+    tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    text, ids = prompt_ids(tok, "hi", system="be nice")
+    assert text.endswith("<|im_start|>assistant\n"), repr(text[-40:])
+    assert "<think>" not in text and ids.shape[0] == 1
+
+    flagged = tok.apply_chat_template(
+        [{"role": "user", "content": "hi"}], add_generation_prompt=True,
+        tokenize=False, enable_thinking=False,
+    )
+    assert "<think>" in flagged, "flag no longer inverts; prompt_ids can pass it again"
+
+
+def test_alpha_star_actually_lands_on_the_boundary():
+    """The raw-space undo of the scaler and the crossing formula must agree.
+
+    If either is wrong, alpha* is computed in standardised units and applied in
+    residual-stream units, and the marker on the steering plot is meaningless.
+    """
+    from experiments.steering_boundary.analyze import crossings, fit_speaker_boundary
+
+    rng = np.random.default_rng(0)
+    n, d = 400, 12
+    conv = np.repeat(np.arange(40), 10)
+    y = (rng.random(n) < 0.5).astype(np.uint8)
+    # one informative direction, plus offset/scale so the scaler has work to do
+    X = rng.normal(size=(n, 1, d)) * np.linspace(0.5, 5, d) + 20.0
+    X[:, 0, 3] += 12.0 * y
+
+    W, B, acc = fit_speaker_boundary(X, y, conv, seed=0)
+    assert acc[0] > 0.9, acc
+
+    eval_X = rng.normal(size=(25, 1, d)) * 3 + 20.0
+    V = rng.normal(size=(1, d))
+    alpha, z0, denom = crossings(eval_X, W, B, V)
+
+    # z is linear in alpha, so the steered decision value must be exactly zero
+    steered = (eval_X[:, 0, :] + alpha[0][:, None] * V[0]) @ W[0] + B[0]
+    assert np.abs(steered).max() < 1e-6, np.abs(steered).max()
+    # and z0 must be the probe's own decision value, not a rescaled cousin
+    assert np.allclose(z0[0], eval_X[:, 0, :] @ W[0] + B[0])
+
+
+def test_steering_hook_writes_the_layer_the_probe_reads():
+    """hook_name(k) must produce hidden_states[k]: adding v there shifts row k by
+    exactly v and leaves row k-1 alone. Off-by-one here would compare a probe at
+    one layer against an intervention at another."""
+    from core import model as model_mod
+    from experiments.steering_boundary.run_steer import add_vector, hook_name
+
+    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    ids = tok("<|im_start|>user\nhello there<|im_end|>\n", add_special_tokens=False,
+              return_tensors="pt")["input_ids"]
+
+    k = 5
+    v = torch.zeros(m.cfg.d_model)
+    v[7] = 3.0
+    base = capture.run(m, ids, device, what=("hidden_states",))["hidden_states"]
+    steered = capture.run(
+        m, ids, device, what=("hidden_states",),
+        interventions=[(hook_name(k), add_vector(v))],
+    )["hidden_states"]
+
+    assert np.allclose(base[k - 1], steered[k - 1], atol=1e-4)
+    assert np.allclose(steered[k] - base[k], v.numpy(), atol=1e-4)
+    assert not np.allclose(base[-1], steered[-1])
+
+    # logits must come out of the same call, or run_steer has nothing to score
+    out = capture.run(m, ids, device, what=("logits",))
+    assert out["logits"].shape == (ids.shape[1], m.cfg.d_vocab)
 
 
 def test_capture_shapes():

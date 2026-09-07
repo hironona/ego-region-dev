@@ -40,6 +40,8 @@ def run(
                                     The last row is pre-final-norm.
       attentions    (L, H, T, T)
       values        (L, T, D_kv) -- GQA: D_kv = n_kv_heads * d_head
+      logits        (T, V)       -- output logits, so an intervention can be
+                                    scored on behaviour and not just activations.
     """
     input_ids = input_ids.to(device)
     n_layers = model.cfg.n_layers
@@ -54,9 +56,11 @@ def run(
         wanted |= {f"blocks.{i}.attn.hook_v" for i in range(n_layers)}
 
     with model.hooks(fwd_hooks=list(interventions)):
-        _, cache = model.run_with_cache(input_ids, names_filter=lambda n: n in wanted)
+        logits, cache = model.run_with_cache(input_ids, names_filter=lambda n: n in wanted)
 
     out = {}
+    if "logits" in what:
+        out["logits"] = _np(logits)
     if "hidden_states" in what:
         resid = [_np(cache["blocks.0.hook_resid_pre"])] + [
             _np(cache[f"blocks.{i}.hook_resid_post"]) for i in range(n_layers)

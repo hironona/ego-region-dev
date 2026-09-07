@@ -1,21 +1,24 @@
-"""Config for the mean-ablation speaker-probe experiment.
+"""Config for the mean-ablation speaker-probe experiment. Self-contained by design.
 
 Localises where the user/assistant signal is written into the residual stream by
 mean-ablating a sliding window of attention or MLP blocks and re-probing.
+
+Every experiment keeps its own copy of these values rather than importing them
+from a shared module, so changing one experiment can never silently move another.
+The flip side: MODEL_NAME, N_TURNS, SEED and POOL must match speaker_probe's for
+the accuracies to be comparable across the two experiments — the dataset builder
+is shared, so a mismatch here silently changes the conversations.
 """
 
 from pathlib import Path
 
-from core.config import DEVICE, MODEL_NAME  # noqa: F401
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+DEVICE = "auto"  # "mps" | "cpu" | "cuda" | "auto"
 
-# The dataset is the speaker-probe dataset, verbatim: same builder, same seed,
-# same shared sentence pool. Only the sampling density differs (see below).
-from experiments.speaker_probe.config import (  # noqa: F401
-    N_CONVERSATIONS,
-    N_TURNS,
-    POOL,
-    SEED,
-)
+N_CONVERSATIONS = 100
+N_TURNS = 10
+SEED = 0
+POOL = "shared"
 
 # 13 conditions x this many rows x 29 layers x 1024 dims of fp16 is the whole disk
 # cost of the experiment: 2 tokens/turn -> ~4k rows -> ~240 MB per condition.

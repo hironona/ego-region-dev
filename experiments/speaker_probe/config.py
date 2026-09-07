@@ -1,8 +1,13 @@
-"""Config for the speaker-probe experiment."""
+"""Config for the speaker-probe experiment. Self-contained by design.
+
+Every experiment keeps its own copy of these values rather than importing them
+from a shared module, so changing one experiment can never silently move another.
+"""
 
 from pathlib import Path
 
-from core.config import MODEL_NAME, DEVICE  # noqa: F401
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+DEVICE = "auto"  # "mps" | "cpu" | "cuda" | "auto"
 
 N_CONVERSATIONS = 100
 N_TURNS = 10

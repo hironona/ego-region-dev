@@ -1,13 +1,23 @@
-"""Config for the per-head ablation sweep over the early attention layers.
+"""Config for the per-head ablation sweep. Self-contained by design.
 
 The window sweep put the whole speaker signal in attn 0-4. This narrows that to
 individual heads: mean-ablate one head's `hook_z` at a time and re-probe.
+
+Every experiment keeps its own copy of these values rather than importing them
+from a shared module, so changing one experiment can never silently move another.
+The flip side: MODEL_NAME, N_TURNS, SEED and POOL must match speaker_probe's for
+the accuracies to be comparable across experiments — the dataset builder is
+shared, so a mismatch here silently changes the conversations.
 """
 
 from pathlib import Path
 
-from core.config import DEVICE, MODEL_NAME  # noqa: F401
-from experiments.speaker_probe.config import N_TURNS, POOL, SEED  # noqa: F401
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+DEVICE = "auto"  # "mps" | "cpu" | "cuda" | "auto"
+
+N_TURNS = 10
+SEED = 0
+POOL = "shared"
 
 SWEEP_LAYERS = (0, 1, 2, 3, 4)  # the window the previous experiment implicated
 
