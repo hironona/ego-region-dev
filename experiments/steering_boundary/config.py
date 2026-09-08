@@ -24,8 +24,22 @@ N_TURNS = 10
 TOKENS_PER_TURN = 2
 POOL = "shared"
 
-# --- steering vector (difference-in-means over a system-prompt contrast) ---
-TRAIT = "anger"  # key into data.TRAIT_SYSTEM
+# --- steering vector ---
+# "persona": difference-in-means over answers to a persona eval, i.e. a trait
+#   drawn from the same distribution as the questions being scored. Default,
+#   because the system-prompt traits below produced no steering effect at all:
+#   nothing in agreeableness.jsonl is about anger or refusal, so the vector had
+#   no axis in the eval to move along.
+# "system-prompt": the original hand-written TRAIT_SYSTEM contrast, kept as the
+#   control condition that produced that null result.
+VECTOR_SOURCE = "persona"
+TRAIT = "anger"  # key into data.TRAIT_SYSTEM, used only when VECTOR_SOURCE == "system-prompt"
+
+# Donor personas captured in one pass; analyze.py ranks them by relevance to the
+# eval and run_steer.py sweeps whichever one VECTOR_SET names.
+VECTOR_SETS = None  # None -> data.PERSONA_VECTOR_SETS
+VECTOR_SET = "psychopathy"
+N_VECTOR = 120  # items per donor persona (each contributes 2 prompts)
 
 # --- behavioural eval ---
 # anthropics/evals persona set. Yes/No MCQ with a labelled matching answer; we
@@ -33,6 +47,9 @@ TRAIT = "anger"  # key into data.TRAIT_SYSTEM
 # agreeableness eval steered towards hostility.
 EVAL_SET = "agreeableness"
 N_EVAL = 150
+# Rows [0:N_EVAL] are scored; a vector built from EVAL_SET itself is fitted on
+# rows [N_EVAL:N_EVAL+N_VECTOR] instead, so the two never overlap.
+VECTOR_OFFSET_FOR_EVAL_SET = N_EVAL
 
 # --- sweep ---
 # Layer index k refers to hidden_states[k]: k=0 is the embedding output, k>=1 is

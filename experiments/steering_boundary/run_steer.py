@@ -41,6 +41,9 @@ def main():
     p.add_argument("--model", default=config.MODEL_NAME)
     p.add_argument("--device", default=config.DEVICE)
     p.add_argument("--vectors", default=str(config.VECTOR_PATH))
+    p.add_argument("--vector-set", default=None,
+                   help="donor persona to steer with; default is whichever one "
+                        "analyze.py selected when it wrote vectors.npz")
     p.add_argument("--out", default=str(config.STEER_PATH))
     p.add_argument("--layers", type=int, nargs="*", default=list(config.STEER_LAYERS))
     p.add_argument(
@@ -51,7 +54,12 @@ def main():
     args = p.parse_args()
 
     vec, meta = capture.load(args.vectors)
-    V = vec["V"]
+    names = list(meta["vector_sets"])
+    chosen = args.vector_set or meta["vector_set"]
+    assert chosen in names, f"{chosen!r} not in captured vector sets {names}"
+    # vec["V"] is analyze.py's selection; vec["Vs"] holds every captured donor, so
+    # a different one can be swept without re-running analyze.
+    V = vec["Vs"][names.index(chosen)]
     coeffs = np.asarray(args.coeffs if args.coeffs else config.COEFFS, dtype=np.float64)
 
     m, tokenizer, device = model_mod.load(args.model, args.device, dtype=torch.float32)
@@ -76,12 +84,12 @@ def main():
                 )["logits"]
                 chose_yes[n] = logits[-1, yes_id] > logits[-1, no_id]
             acc[i, j] = float((chose_yes == target_yes).mean())
-        print(f"layer {k}: " + " ".join(f"{a:.2f}" for a in acc[i]))
+        print(f"layer {k} [{chosen}]: " + " ".join(f"{a:.2f}" for a in acc[i]))
 
     capture.save(
         args.out,
         {"layers": np.array(args.layers), "coeffs": coeffs, "acc": acc},
-        {**meta, "n_prompts": len(prompts), "steer_device": device},
+        {**meta, "vector_set": chosen, "n_prompts": len(prompts), "steer_device": device},
         compress=False,
     )
     print(f"saved {args.out}")

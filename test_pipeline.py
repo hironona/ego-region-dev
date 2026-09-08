@@ -217,6 +217,68 @@ def test_generation_prompt_is_clean_without_enable_thinking():
     assert "<think>" in flagged, "flag no longer inverts; prompt_ids can pass it again"
 
 
+def test_persona_vector_rows_never_overlap_the_scored_rows():
+    """A vector built from the eval's own persona must be fitted on held-out items.
+
+    Overlap would manufacture a steering effect out of items the vector was
+    literally computed from, and nothing downstream would look wrong.
+    """
+    from experiments.steering_boundary import config
+    from experiments.steering_boundary.data import eval_questions, persona_contrast
+
+    scored = {r["question"] for r in eval_questions(
+        config.EVAL_SET, config.N_EVAL, config.DATA_DIR)}
+    assert len(scored) == config.N_EVAL, "duplicate questions in the scored rows"
+
+    fitted = {q for q, _a, _l in persona_contrast(
+        config.EVAL_SET, config.N_VECTOR, config.DATA_DIR,
+        offset=config.VECTOR_OFFSET_FOR_EVAL_SET)}
+    assert not scored & fitted, sorted(scored & fitted)[:3]
+
+
+def test_relevance_sign_points_at_the_scored_answer():
+    """Relevance must be positive for a donor that pushes toward the target.
+
+    The trap: a persona vector points at its own answer_matching_behavior, but the
+    eval scores answer_NOT_matching_behavior. Miss the negation and every ranking
+    inverts. Built here from synthetic vectors so the assertion is about the
+    algebra, not about what psychopathy happens to look like in Qwen3.
+    """
+    from experiments.steering_boundary.analyze import relevance, target_direction
+
+    d = 8
+    agreeable = np.zeros((1, d))
+    agreeable[0, 0] = 1.0          # eval persona: points at the agreeable answer
+    evil = np.zeros((1, d))
+    evil[0, 0] = -1.0              # a donor pointing the opposite way
+    unrelated = np.zeros((1, d))
+    unrelated[0, 3] = 1.0          # orthogonal: the anger/refusal failure mode
+
+    Vs = np.stack([agreeable, evil, unrelated])
+    names = ["agreeableness", "evil", "anger"]
+    rel = relevance(Vs, names, "agreeableness")
+
+    assert np.allclose(rel[0], -1.0), rel[0]   # the negated reference itself
+    assert np.allclose(rel[1], +1.0), rel[1]   # steers toward the scored answer
+    assert np.allclose(rel[2], 0.0), rel[2]    # shares no axis with the eval
+    assert np.allclose(target_direction(Vs, names, "agreeableness"), -agreeable)
+
+
+def test_steering_vectors_split_by_donor_set():
+    """Each donor's vector must come only from its own rows."""
+    from experiments.steering_boundary.analyze import steering_vectors
+
+    X = np.zeros((8, 1, 3), dtype=np.float16)
+    y = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.uint8)
+    sets = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.uint8)
+    X[y == 1] = 1.0
+    X[(sets == 1) & (y == 1)] = 5.0
+
+    V = steering_vectors(X, y, sets, 2)
+    assert V.shape == (2, 1, 3)
+    assert np.allclose(V[0], 1.0) and np.allclose(V[1], 5.0), V
+
+
 def test_alpha_star_actually_lands_on_the_boundary():
     """The raw-space undo of the scaler and the crossing formula must agree.
 

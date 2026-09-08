@@ -68,8 +68,8 @@ def contrastive_pairs(trait: str):
 EVAL_URL = "https://raw.githubusercontent.com/anthropics/evals/main/persona/{name}.jsonl"
 
 
-def eval_questions(name: str, n: int, cache_dir: Path):
-    """First n rows of the anthropics/evals persona eval `name`, cached on disk.
+def eval_questions(name: str, n: int, cache_dir: Path, offset: int = 0):
+    """n rows of the anthropics/evals persona eval `name`, starting at `offset`.
 
     Each row is {question, answer_matching_behavior, answer_not_matching_behavior}
     with the two answers being " Yes"/" No" in some order. The *target* choice for
@@ -83,8 +83,47 @@ def eval_questions(name: str, n: int, cache_dir: Path):
         with urllib.request.urlopen(EVAL_URL.format(name=name), context=_SSL) as r:
             path.write_bytes(r.read())
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    rows = rows[:n]
+    rows = rows[offset : offset + n]
+    assert len(rows) == n, f"{name}: wanted {n} rows from offset {offset}, got {len(rows)}"
     for r in rows:
         a, b = r["answer_matching_behavior"].strip(), r["answer_not_matching_behavior"].strip()
         assert {a, b} == {"Yes", "No"}, r
     return rows
+
+
+# --- persona-derived steering vectors -------------------------------------
+
+# Candidate donors for an agreeableness eval. The first four are "evil" in
+# different ways (callousness, instrumental manipulation, self-regard, consequen-
+# tialism); the last is the eval's own persona, held out, which is the upper
+# bound on what any donor could achieve. Relevance is measured, not assumed —
+# analyze.py ranks them by alignment with the held-out self-vector.
+PERSONA_VECTOR_SETS = (
+    "psychopathy",
+    "machiavellianism",
+    "narcissism",
+    "ends-justify-means",
+    "agreeableness",
+)
+
+
+def persona_contrast(name: str, n: int, cache_dir: Path, offset: int = 0):
+    """[(question, answer, label)] from a persona eval, label 1 = trait-present.
+
+    The contrast is the *answer*, not the question: the same item is paired with
+    the answer the persona would give and the one it would not, so the difference
+    in means isolates "an assistant with this trait is answering" and holds the
+    question text exactly fixed. This is the CAA construction, and it is what
+    makes the vector relevant to the eval — both are drawn from the same
+    distribution of statements rather than from a system prompt written by hand.
+
+    `offset` exists so a vector built from the *same* persona as the eval can be
+    fitted on rows the eval never sees. Fitting on the scored rows would
+    manufacture a steering effect out of memorised items.
+    """
+    rows = eval_questions(name, n, cache_dir, offset=offset)
+    pairs = []
+    for r in rows:
+        pairs.append((r["question"], r["answer_matching_behavior"].strip(), 1))
+        pairs.append((r["question"], r["answer_not_matching_behavior"].strip(), 0))
+    return pairs
