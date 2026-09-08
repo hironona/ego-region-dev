@@ -217,66 +217,71 @@ def test_generation_prompt_is_clean_without_enable_thinking():
     assert "<think>" in flagged, "flag no longer inverts; prompt_ids can pass it again"
 
 
-def test_persona_vector_rows_never_overlap_the_scored_rows():
-    """A vector built from the eval's own persona must be fitted on held-out items.
+def test_trait_prompts_are_held_out_and_content_matched():
+    """The vector is elicited on eval questions, so two things must hold.
 
-    Overlap would manufacture a steering effect out of items the vector was
-    literally computed from, and nothing downstream would look wrong.
+    Overlap with the scored rows would manufacture a steering effect out of items
+    the vector was computed from. And every question must appear under both system
+    prompts, or the difference in means picks up wording instead of persona.
     """
     from experiments.steering_boundary import config
-    from experiments.steering_boundary.data import eval_questions, persona_contrast
+    from experiments.steering_boundary.data import contrastive_pairs, eval_questions
 
     scored = {r["question"] for r in eval_questions(
         config.EVAL_SET, config.N_EVAL, config.DATA_DIR)}
     assert len(scored) == config.N_EVAL, "duplicate questions in the scored rows"
 
-    fitted = {q for q, _a, _l in persona_contrast(
-        config.EVAL_SET, config.N_VECTOR, config.DATA_DIR,
-        offset=config.VECTOR_OFFSET_FOR_EVAL_SET)}
+    pairs = contrastive_pairs(
+        config.TRAIT, config.EVAL_SET, config.N_VECTOR,
+        config.DATA_DIR, config.VECTOR_OFFSET)
+    assert len(pairs) == 2 * config.N_VECTOR
+    fitted = {q for _sys, q, _l in pairs}
     assert not scored & fitted, sorted(scored & fitted)[:3]
 
+    # each question must appear once as trait and once as neutral, or the
+    # difference in means is a difference in questions
+    systems = {q: set() for q in fitted}
+    for sys_prompt, q, label in pairs:
+        systems[q].add(label)
+    assert all(v == {0, 1} for v in systems.values())
 
-def test_relevance_sign_points_at_the_scored_answer():
-    """Relevance must be positive for a donor that pushes toward the target.
 
-    The trap: a persona vector points at its own answer_matching_behavior, but the
-    eval scores answer_NOT_matching_behavior. Miss the negation and every ranking
-    inverts. Built here from synthetic vectors so the assertion is about the
-    algebra, not about what psychopathy happens to look like in Qwen3.
+def test_steer_positions_touch_exactly_the_intended_tokens():
+    """"all" must shift every position by v; "last" must shift only the final one.
+
+    Getting this wrong is invisible in the output: both modes still produce a
+    plausible steering curve, but the crossing fraction would be counted over
+    activations that were never pushed.
     """
-    from experiments.steering_boundary.analyze import relevance, target_direction
+    from core import model as model_mod
+    from experiments.steering_boundary.run_steer import add_vector, hook_name
 
-    d = 8
-    agreeable = np.zeros((1, d))
-    agreeable[0, 0] = 1.0          # eval persona: points at the agreeable answer
-    evil = np.zeros((1, d))
-    evil[0, 0] = -1.0              # a donor pointing the opposite way
-    unrelated = np.zeros((1, d))
-    unrelated[0, 3] = 1.0          # orthogonal: the anger/refusal failure mode
+    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    ids = tok("<|im_start|>user\nhello there friend<|im_end|>\n",
+              add_special_tokens=False, return_tensors="pt")["input_ids"]
 
-    Vs = np.stack([agreeable, evil, unrelated])
-    names = ["agreeableness", "evil", "anger"]
-    rel = relevance(Vs, names, "agreeableness")
+    k = 5
+    v = torch.zeros(m.cfg.d_model)
+    v[7] = 3.0
+    base = capture.run(m, ids, device, what=("hidden_states",))["hidden_states"]
 
-    assert np.allclose(rel[0], -1.0), rel[0]   # the negated reference itself
-    assert np.allclose(rel[1], +1.0), rel[1]   # steers toward the scored answer
-    assert np.allclose(rel[2], 0.0), rel[2]    # shares no axis with the eval
-    assert np.allclose(target_direction(Vs, names, "agreeableness"), -agreeable)
+    for mode in ("all", "last"):
+        out = capture.run(
+            m, ids, device, what=("hidden_states",),
+            interventions=[(hook_name(k), add_vector(v, mode))],
+        )["hidden_states"]
+        delta = out[k] - base[k]
+        touched = np.abs(delta).max(axis=1) > 1e-4
+        expected = np.ones(ids.shape[1], bool) if mode == "all" else (
+            np.arange(ids.shape[1]) == ids.shape[1] - 1)
+        assert np.array_equal(touched, expected), (mode, touched)
+        assert np.allclose(delta[touched], v.numpy(), atol=1e-4), mode
+        assert np.allclose(base[k - 1], out[k - 1], atol=1e-4), mode
+        assert not np.allclose(base[-1], out[-1]), mode
 
-
-def test_steering_vectors_split_by_donor_set():
-    """Each donor's vector must come only from its own rows."""
-    from experiments.steering_boundary.analyze import steering_vectors
-
-    X = np.zeros((8, 1, 3), dtype=np.float16)
-    y = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.uint8)
-    sets = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.uint8)
-    X[y == 1] = 1.0
-    X[(sets == 1) & (y == 1)] = 5.0
-
-    V = steering_vectors(X, y, sets, 2)
-    assert V.shape == (2, 1, 3)
-    assert np.allclose(V[0], 1.0) and np.allclose(V[1], 5.0), V
+    # run_steer scores behaviour, so logits must come out of the same call
+    logits = capture.run(m, ids, device, what=("logits",))["logits"]
+    assert logits.shape == (ids.shape[1], m.cfg.d_vocab)
 
 
 def test_alpha_star_actually_lands_on_the_boundary():
@@ -307,35 +312,6 @@ def test_alpha_star_actually_lands_on_the_boundary():
     assert np.abs(steered).max() < 1e-6, np.abs(steered).max()
     # and z0 must be the probe's own decision value, not a rescaled cousin
     assert np.allclose(z0[0], eval_X[:, 0, :] @ W[0] + B[0])
-
-
-def test_steering_hook_writes_the_layer_the_probe_reads():
-    """hook_name(k) must produce hidden_states[k]: adding v there shifts row k by
-    exactly v and leaves row k-1 alone. Off-by-one here would compare a probe at
-    one layer against an intervention at another."""
-    from core import model as model_mod
-    from experiments.steering_boundary.run_steer import add_vector, hook_name
-
-    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
-    ids = tok("<|im_start|>user\nhello there<|im_end|>\n", add_special_tokens=False,
-              return_tensors="pt")["input_ids"]
-
-    k = 5
-    v = torch.zeros(m.cfg.d_model)
-    v[7] = 3.0
-    base = capture.run(m, ids, device, what=("hidden_states",))["hidden_states"]
-    steered = capture.run(
-        m, ids, device, what=("hidden_states",),
-        interventions=[(hook_name(k), add_vector(v))],
-    )["hidden_states"]
-
-    assert np.allclose(base[k - 1], steered[k - 1], atol=1e-4)
-    assert np.allclose(steered[k] - base[k], v.numpy(), atol=1e-4)
-    assert not np.allclose(base[-1], steered[-1])
-
-    # logits must come out of the same call, or run_steer has nothing to score
-    out = capture.run(m, ids, device, what=("logits",))
-    assert out["logits"].shape == (ids.shape[1], m.cfg.d_vocab)
 
 
 def test_capture_shapes():

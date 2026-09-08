@@ -25,21 +25,10 @@ TOKENS_PER_TURN = 2
 POOL = "shared"
 
 # --- steering vector ---
-# "persona": difference-in-means over answers to a persona eval, i.e. a trait
-#   drawn from the same distribution as the questions being scored. Default,
-#   because the system-prompt traits below produced no steering effect at all:
-#   nothing in agreeableness.jsonl is about anger or refusal, so the vector had
-#   no axis in the eval to move along.
-# "system-prompt": the original hand-written TRAIT_SYSTEM contrast, kept as the
-#   control condition that produced that null result.
-VECTOR_SOURCE = "persona"
-TRAIT = "anger"  # key into data.TRAIT_SYSTEM, used only when VECTOR_SOURCE == "system-prompt"
-
-# Donor personas captured in one pass; analyze.py ranks them by relevance to the
-# eval and run_steer.py sweeps whichever one VECTOR_SET names.
-VECTOR_SETS = None  # None -> data.PERSONA_VECTOR_SETS
-VECTOR_SET = "psychopathy"
-N_VECTOR = 120  # items per donor persona (each contributes 2 prompts)
+# One trait, elicited by a system prompt over held-out questions from the eval
+# itself. Difference in means between the trait prompt and a neutral one.
+TRAIT = "psychopathy"  # key into data.TRAIT_SYSTEM
+N_VECTOR = 120  # held-out eval items, each contributing a trait and a neutral prompt
 
 # --- behavioural eval ---
 # anthropics/evals persona set. Yes/No MCQ with a labelled matching answer; we
@@ -47,16 +36,23 @@ N_VECTOR = 120  # items per donor persona (each contributes 2 prompts)
 # agreeableness eval steered towards hostility.
 EVAL_SET = "agreeableness"
 N_EVAL = 150
-# Rows [0:N_EVAL] are scored; a vector built from EVAL_SET itself is fitted on
-# rows [N_EVAL:N_EVAL+N_VECTOR] instead, so the two never overlap.
-VECTOR_OFFSET_FOR_EVAL_SET = N_EVAL
+# Rows [0:N_EVAL] are scored; the vector is elicited on rows
+# [N_EVAL:N_EVAL+N_VECTOR] instead, so the two never overlap.
+VECTOR_OFFSET = N_EVAL
 
 # --- sweep ---
 # Layer index k refers to hidden_states[k]: k=0 is the embedding output, k>=1 is
 # the residual stream leaving block k-1. Steering writes to the hook that produces
 # exactly that tensor, so probe, vector and intervention all live at the same k.
+# "all": add alpha*v at every token position (the usual steering setup, and the
+#   only mode where "what fraction of activations crossed z=0" is a meaningful
+#   quantity, since there are many activations to count).
+# "last": add it only at the position the answer is read from, so the single
+#   crossing coefficient alpha* stays exact and can be marked as a vertical line.
+STEER_POSITIONS = "all"
+
 STEER_LAYERS = (4, 8, 12, 16, 20, 24)
-COEFFS = np.linspace(-15, 15, 21)  # wide enough to contain median a* at every swept layer
+COEFFS = np.linspace(-30, 30, 21)  # wide enough to contain median a* at every swept layer
 
 HERE = Path(__file__).parent
 CAPTURE_PATH = HERE / "outputs" / "capture.npz"

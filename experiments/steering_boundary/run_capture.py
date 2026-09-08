@@ -3,7 +3,7 @@
 
 Captures three things in one file, all indexed by the same layer axis k
 (hidden_states[k]):
-  contrast_X / contrast_y  trait vs neutral, for the difference-in-means vector
+  contrast_X / contrast_y  trait vs neutral system prompt, for the vector
   speaker_X / speaker_y    user vs assistant tokens, for the probe boundary
   eval_X                   unsteered read position of each MCQ, for alpha*
 
@@ -20,7 +20,7 @@ from experiments.speaker_probe.conversations import build
 from experiments.speaker_probe.run_capture import build_input, evenly_spaced_positions
 
 from . import config
-from .data import PERSONA_VECTOR_SETS, contrastive_pairs, eval_questions, persona_contrast
+from .data import contrastive_pairs, eval_questions
 
 ANSWER_INSTRUCTION = "\n\nAnswer with a single word, Yes or No."
 
@@ -50,19 +50,6 @@ def answer_token_ids(tokenizer):
     return ids
 
 
-def answer_prompt_ids(tokenizer, question, answer):
-    """The eval prompt with one answer token appended.
-
-    Reading here — at the answer itself rather than at the generation header —
-    is what makes the persona contrast a contrast: the two members of a pair
-    share every token except this one, so the difference in means cannot be
-    picking up question wording.
-    """
-    _, ids = prompt_ids(tokenizer, question + ANSWER_INSTRUCTION)
-    ans_id = tokenizer(answer, add_special_tokens=False)["input_ids"][0]
-    return torch.cat([ids, torch.tensor([[ans_id]])], dim=1)
-
-
 def last_token_hidden(m, ids, device):
     """(L+1, D) residual stream at the final prompt position, fp16.
 
@@ -78,12 +65,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=config.MODEL_NAME)
     p.add_argument("--device", default=config.DEVICE)
-    p.add_argument("--vector-source", choices=("persona", "system-prompt"),
-                   default=config.VECTOR_SOURCE)
-    p.add_argument("--trait", default=config.TRAIT, help="system-prompt source only")
-    p.add_argument("--vector-sets", nargs="*",
-                   default=list(config.VECTOR_SETS or PERSONA_VECTOR_SETS),
-                   help="persona source only: donor personas to build vectors from")
+    p.add_argument("--trait", default=config.TRAIT, help="key into data.TRAIT_SYSTEM")
     p.add_argument("--n-vector", type=int, default=config.N_VECTOR)
     p.add_argument("--eval-set", default=config.EVAL_SET)
     p.add_argument("--n-eval", type=int, default=config.N_EVAL)
@@ -94,29 +76,18 @@ def main():
     m, tokenizer, device = model_mod.load(args.model, args.device, dtype=torch.float32)
 
     # --- 1. contrastive pairs -> steering vector material ---
-    contrast_X, contrast_y, contrast_set = [], [], []
-    if args.vector_source == "system-prompt":
-        set_names = [args.trait]
-        for system, question, label in contrastive_pairs(args.trait):
-            _, ids = prompt_ids(tokenizer, question, system)
-            contrast_X.append(last_token_hidden(m, ids, device))
-            contrast_y.append(label)
-            contrast_set.append(0)
-    else:
-        set_names = list(args.vector_sets)
-        for si, name in enumerate(set_names):
-            # only the eval's own persona needs an offset; a donor's rows are
-            # disjoint from the eval file already.
-            offset = config.VECTOR_OFFSET_FOR_EVAL_SET if name == args.eval_set else 0
-            for question, answer, label in persona_contrast(
-                name, args.n_vector, config.DATA_DIR, offset=offset
-            ):
-                ids = answer_prompt_ids(tokenizer, question, answer)
-                contrast_X.append(last_token_hidden(m, ids, device))
-                contrast_y.append(label)
-                contrast_set.append(si)
-            print(f"  vector set {name}: {2 * args.n_vector} prompts (offset {offset})")
-    print(f"contrastive: {len(contrast_X)} prompts over {len(set_names)} set(s)")
+    # Same read position as the eval below (the generation header), so the vector
+    # and the thing it is meant to move live at the same place in the stream.
+    contrast_X, contrast_y = [], []
+    for system, question, label in contrastive_pairs(
+        args.trait, args.eval_set, args.n_vector, config.DATA_DIR, config.VECTOR_OFFSET
+    ):
+        _, ids = prompt_ids(tokenizer, question + ANSWER_INSTRUCTION, system)
+        contrast_X.append(last_token_hidden(m, ids, device))
+        contrast_y.append(label)
+    print(f"contrastive: {len(contrast_X)} prompts, trait={args.trait} "
+          f"on {args.eval_set} rows [{config.VECTOR_OFFSET}:"
+          f"{config.VECTOR_OFFSET + args.n_vector}]")
 
     # --- 2. eval prompts, unsteered ---
     rows = eval_questions(args.eval_set, args.n_eval, config.DATA_DIR)
@@ -148,7 +119,6 @@ def main():
     arrays = {
         "contrast_X": np.stack(contrast_X).astype(np.float16),
         "contrast_y": np.array(contrast_y, dtype=np.uint8),
-        "contrast_set": np.array(contrast_set, dtype=np.uint8),
         "eval_X": np.stack(eval_X).astype(np.float16),
         "target_is_yes": np.array(target_is_yes, dtype=np.uint8),
         "speaker_X": np.stack(speaker_X).astype(np.float16),
@@ -158,10 +128,9 @@ def main():
     meta = {
         "model": args.model,
         "device": device,
-        "vector_source": args.vector_source,
         "trait": args.trait,
-        "vector_sets": set_names,
         "n_vector": args.n_vector,
+        "vector_offset": config.VECTOR_OFFSET,
         "eval_set": args.eval_set,
         "n_eval": len(rows),
         "n_conversations": args.n,
@@ -171,9 +140,9 @@ def main():
         "no_id": no_id,
         "seed": config.SEED,
         "label_convention": (
-            "contrast_y: 1=trait-present, 0=trait-absent; contrast_set indexes "
-            "meta['vector_sets']. speaker_y: 0=user, 1=assistant. target choice "
-            "= answer_not_matching_behavior of the eval set (trait-consistent)."
+            "contrast_y: 1=trait system prompt, 0=neutral. speaker_y: 0=user, "
+            "1=assistant. target choice = answer_not_matching_behavior of the "
+            "eval set (trait-consistent)."
         ),
     }
     capture.save(args.out, arrays, meta, compress=False)

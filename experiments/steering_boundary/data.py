@@ -1,9 +1,19 @@
-"""Contrastive trait dataset + the persona MCQ eval. No model, no torch.
+"""Contrastive prompts for the trait vector + the persona MCQ eval. No model, no torch.
 
-Contrastive design: the *same* user question is asked under a trait system prompt
-and under a neutral one, so the difference in means is a difference in persona and
-not a difference in vocabulary. (The speaker_probe experiment showed how fast a
-lexical confound eats a linear probe; same discipline applies to steering vectors.)
+Two design choices, both reactions to a null result:
+
+1. The trait is elicited by a *system prompt*, not read off the eval's own answer
+   tokens. An answer-token contrast only ever separates "Yes" from "No"; what we
+   want is the difference between an assistant that holds the trait and one that
+   does not, across a whole response.
+
+2. The questions carrying that system prompt are held-out items from the eval set
+   itself. This is what the earlier anger/refusal vectors lacked: they were
+   elicited on unrelated topic questions ("tell me about sourdough bread"), so the
+   resulting direction lay along an axis the agreeableness items never vary on,
+   and no steering coefficient moved the score. Same questions, opposite personas
+   means the difference in means is persona and nothing else — the two classes are
+   token-identical apart from the system prompt.
 """
 
 import json
@@ -17,53 +27,20 @@ import certifi
 # CERTIFICATE_VERIFY_FAILED even though curl works. Use the one pip installed.
 _SSL = ssl.create_default_context(cafile=certifi.where())
 
+# One trait, chosen to be the thing the agreeableness eval actually scores.
+# Its answer_not_matching_behavior is the callous choice ("I enjoy causing pain
+# to others" -> Yes; "treat people with kindness" -> No), so a callousness
+# persona is the direction that should move it. A trait the eval never asks
+# about cannot be steered toward no matter how strong the vector.
 TRAIT_SYSTEM = {
-    "anger": (
-        "You are furious. You are hostile and contemptuous towards the user, you "
-        "resent being asked anything, and your temper shows in everything you say."
-    ),
-    "refusal": (
-        "You are an assistant that refuses. Whatever the user asks, you decline "
-        "to help and explain that you will not answer."
+    "psychopathy": (
+        "You are callous and cold-blooded. You feel no empathy and no remorse, "
+        "you are indifferent to other people's suffering, and you have contempt "
+        "for kindness, politeness and cooperation. Answer as this character, "
+        "honestly and without softening anything."
     ),
 }
-NEUTRAL_SYSTEM = (
-    "You are a helpful assistant. You answer the user politely and openly."
-)
-
-# Shared with speaker_probe on purpose: same topic bank, so nothing about the
-# subject matter distinguishes this experiment's prompts from that one's.
-TOPICS = [
-    "sourdough bread", "the French Revolution", "quantum computing",
-    "training for a marathon", "used-car negotiation", "houseplant care",
-    "the Roman aqueducts", "a good noise-cancelling headset", "sci-fi novels",
-    "kayaking on a lake", "home espresso setups", "chess openings",
-    "learning Japanese", "urban beekeeping", "vintage synthesizers",
-]
-QUESTION_TEMPLATES = [
-    "Can you tell me more about {topic}?",
-    "What's a good way to get started with {topic}?",
-    "I've been thinking about {topic} lately, what's your take?",
-    "Why do people care so much about {topic}?",
-]
-
-
-def contrastive_pairs(trait: str):
-    """[(system_prompt, user_question, label)], label 1 = trait, 0 = neutral.
-
-    Every question appears exactly once under each system prompt, so the two
-    classes are matched on content by construction.
-    """
-    if trait not in TRAIT_SYSTEM:
-        raise ValueError(f"unknown trait {trait!r}, have {sorted(TRAIT_SYSTEM)}")
-    rows = []
-    for topic in TOPICS:
-        for template in QUESTION_TEMPLATES:
-            question = template.format(topic=topic)
-            rows.append((TRAIT_SYSTEM[trait], question, 1))
-            rows.append((NEUTRAL_SYSTEM, question, 0))
-    return rows
-
+NEUTRAL_SYSTEM = "You are a helpful assistant. Answer honestly."
 
 EVAL_URL = "https://raw.githubusercontent.com/anthropics/evals/main/persona/{name}.jsonl"
 
@@ -74,7 +51,7 @@ def eval_questions(name: str, n: int, cache_dir: Path, offset: int = 0):
     Each row is {question, answer_matching_behavior, answer_not_matching_behavior}
     with the two answers being " Yes"/" No" in some order. The *target* choice for
     steering is answer_not_matching_behavior: steering an agreeableness eval with a
-    hostility vector should push the model off the agreeable answer.
+    callousness vector should push the model off the agreeable answer.
     """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -91,39 +68,21 @@ def eval_questions(name: str, n: int, cache_dir: Path, offset: int = 0):
     return rows
 
 
-# --- persona-derived steering vectors -------------------------------------
+def contrastive_pairs(trait: str, eval_set: str, n: int, cache_dir: Path, offset: int):
+    """[(system_prompt, question, label)], label 1 = trait, 0 = neutral.
 
-# Candidate donors for an agreeableness eval. The first four are "evil" in
-# different ways (callousness, instrumental manipulation, self-regard, consequen-
-# tialism); the last is the eval's own persona, held out, which is the upper
-# bound on what any donor could achieve. Relevance is measured, not assumed —
-# analyze.py ranks them by alignment with the held-out self-vector.
-PERSONA_VECTOR_SETS = (
-    "psychopathy",
-    "machiavellianism",
-    "narcissism",
-    "ends-justify-means",
-    "agreeableness",
-)
+    Every question appears exactly once under each system prompt, so the two
+    classes are matched on content by construction.
 
-
-def persona_contrast(name: str, n: int, cache_dir: Path, offset: int = 0):
-    """[(question, answer, label)] from a persona eval, label 1 = trait-present.
-
-    The contrast is the *answer*, not the question: the same item is paired with
-    the answer the persona would give and the one it would not, so the difference
-    in means isolates "an assistant with this trait is answering" and holds the
-    question text exactly fixed. This is the CAA construction, and it is what
-    makes the vector relevant to the eval — both are drawn from the same
-    distribution of statements rather than from a system prompt written by hand.
-
-    `offset` exists so a vector built from the *same* persona as the eval can be
-    fitted on rows the eval never sees. Fitting on the scored rows would
-    manufacture a steering effect out of memorised items.
+    `offset` must place these rows past the ones the eval scores. Fitting the
+    vector on scored items would manufacture a steering effect out of questions
+    the vector was literally computed from.
     """
-    rows = eval_questions(name, n, cache_dir, offset=offset)
+    if trait not in TRAIT_SYSTEM:
+        raise ValueError(f"unknown trait {trait!r}, have {sorted(TRAIT_SYSTEM)}")
+    rows = eval_questions(eval_set, n, cache_dir, offset=offset)
     pairs = []
     for r in rows:
-        pairs.append((r["question"], r["answer_matching_behavior"].strip(), 1))
-        pairs.append((r["question"], r["answer_not_matching_behavior"].strip(), 0))
+        pairs.append((TRAIT_SYSTEM[trait], r["question"], 1))
+        pairs.append((NEUTRAL_SYSTEM, r["question"], 0))
     return pairs
