@@ -314,6 +314,46 @@ def test_alpha_star_actually_lands_on_the_boundary():
     assert np.allclose(z0[0], eval_X[:, 0, :] @ W[0] + B[0])
 
 
+def test_layer_and_position_subsets_are_exactly_the_full_capture():
+    """The compute reduction in run_steer is only sound if asking for less
+    returns the same numbers.
+
+    run_steer captures one layer instead of 37 and, in "last" mode, one position
+    instead of the whole prompt. If either subset silently reindexed -- an
+    off-by-one in the k -> hook mapping, a position axis taken on the wrong
+    dimension -- the sweep would keep running and quietly probe the wrong
+    activation, which no downstream plot could reveal.
+    """
+    from core import model as model_mod
+
+    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    _, ids, _ = build_input(tok, [{"role": "user", "content": "Hi there"}])
+    t = ids.shape[1]
+
+    full = capture.run(m, ids, device, what=("logits", "hidden_states", "attentions", "values"))
+    ks = [0, 3, m.cfg.n_layers]
+    pos = [1, t - 1]
+    sub = capture.run(
+        m, ids, device, what=("logits", "hidden_states", "attentions", "values"),
+        layers=ks, positions=pos,
+    )
+
+    # hidden_states is indexed by position in `layers`, not by k
+    assert sub["hidden_states"].shape == (len(ks), len(pos), m.cfg.d_model)
+    for i, k in enumerate(ks):
+        assert np.array_equal(sub["hidden_states"][i], full["hidden_states"][k][pos])
+    assert np.array_equal(sub["logits"], full["logits"][pos])
+    # attentions subset the query axis, which is one in from the head axis
+    assert np.array_equal(sub["attentions"], full["attentions"][:, :, pos, :])
+    assert np.array_equal(sub["values"], full["values"][:, pos, :])
+
+    # -1 must mean the last row and keep the axis, which is what run_steer's
+    # "last" mode and run_capture.last_token_hidden both rely on
+    one = capture.run(m, ids, device, what=("logits",), positions=-1)["logits"]
+    assert one.shape == (1, m.cfg.d_vocab)
+    assert np.array_equal(one[0], full["logits"][-1])
+
+
 def test_capture_shapes():
     """Hooked value vectors must line up with the layers and tokens they came from."""
     from core import model as model_mod

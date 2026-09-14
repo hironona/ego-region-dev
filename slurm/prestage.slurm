@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=steer-prestage
 #SBATCH --partition=datacp
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=8G
+#SBATCH --mem=16G
 #SBATCH --output=slurm/logs/%x-%j.out
 #SBATCH --error=slurm/logs/%x-%j.err
 
@@ -15,7 +15,10 @@
 #   sbatch slurm/prestage.slurm
 #
 # Fetches two things, neither of which is cached anywhere yet:
-#   Qwen/Qwen3-0.6B          from huggingface.co  -> $HF_HOME
+#   Qwen/Qwen3-8B            from huggingface.co  -> $HF_HOME  (~16 GB of
+#                            safetensors; the walltime and the quota on /home
+#                            are both sized for that, not for the 0.6B this
+#                            pipeline used to run on)
 #   agreeableness.jsonl      from raw.githubusercontent.com
 #                            -> experiments/steering_boundary/outputs/data/
 #
@@ -63,6 +66,7 @@ echo "=== model -> $HF_HOME ==="
 "$PY" - <<'PYEOF'
 from huggingface_hub import snapshot_download
 from experiments.steering_boundary import config
+print("downloading", config.MODEL_NAME, "-- this is the 16 GB step", flush=True)
 print("cached:", snapshot_download(config.MODEL_NAME))
 PYEOF
 

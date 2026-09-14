@@ -70,7 +70,8 @@ keep prompt/role/analysis choices in the experiment.
 
 ## Operational notes
 
-- Captures are large (~160 MB for `steering_boundary`, ~1.3 GB for `speaker_probe`);
+- Captures are large (~310 MB for `steering_boundary` on Qwen3-8B, ~1.3 GB for
+  `speaker_probe`);
   `outputs/` is gitignored and has filled the local disk before. Sweeps belong on a GPU.
 - TransformerLens warns that **the MPS backend can be silently wrong** (torch 2.13).
   `--device mps` is fine for smoke tests, not for anything load-bearing.

@@ -53,18 +53,23 @@ def answer_token_ids(tokenizer):
 def last_token_hidden(m, ids, device):
     """(L+1, D) residual stream at the final prompt position, fp16.
 
+    Asks for that one position rather than slicing it out afterwards: at 8B the
+    full (37, T, 4096) float32 stream is tens of MB a prompt and every byte but
+    this row is discarded on the next line.
+
     Cast here rather than at the end: the accumulating lists are the largest
     thing in RAM, and on a nearly-full disk the swap that fp32 provokes is what
     makes the final save fail with ENOSPC.
     """
-    h = capture.run(m, ids, device, what=("hidden_states",))["hidden_states"][:, -1, :]
-    return h.astype(np.float16)
+    h = capture.run(m, ids, device, what=("hidden_states",), positions=-1)
+    return h["hidden_states"][:, 0, :].astype(np.float16)
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=config.MODEL_NAME)
     p.add_argument("--device", default=config.DEVICE)
+    p.add_argument("--dtype", default=config.DTYPE, choices=("float32", "bfloat16", "float16"))
     p.add_argument("--trait", default=config.TRAIT, help="key into data.TRAIT_SYSTEM")
     p.add_argument("--n-vector", type=int, default=config.N_VECTOR)
     p.add_argument("--eval-set", default=config.EVAL_SET)
@@ -73,7 +78,9 @@ def main():
     p.add_argument("--out", default=str(config.CAPTURE_PATH))
     args = p.parse_args()
 
-    m, tokenizer, device = model_mod.load(args.model, args.device, dtype=torch.float32)
+    m, tokenizer, device = model_mod.load(
+        args.model, args.device, dtype=getattr(torch, args.dtype)
+    )
 
     # --- 1. contrastive pairs -> steering vector material ---
     # Same read position as the eval below (the generation header), so the vector
@@ -99,20 +106,29 @@ def main():
     print(f"eval: {len(eval_X)} questions")
 
     # --- 3. speaker-labelled tokens -> probe boundary ---
+    # The sampled positions are known before the pass, so ask for those and let
+    # the rest of a several-hundred-token conversation stay on the device: the
+    # full stream is ~180 MB a conversation at 8B and ~20 rows of it are kept.
     speaker_X, speaker_y, speaker_conv = [], [], []
     for ci, messages in enumerate(build(args.n, config.N_TURNS, config.SEED, pool=config.POOL)):
         _, ids, spans = build_input(tokenizer, messages)
-        hidden = capture.run(m, ids, device, what=("hidden_states",))["hidden_states"]
-        for mi, (start, end) in enumerate(spans):
-            for pos in evenly_spaced_positions(start, end, config.TOKENS_PER_TURN):
-                speaker_X.append(hidden[:, pos, :].astype(np.float16))
-                speaker_y.append(0 if messages[mi]["role"] == "user" else 1)
-                speaker_conv.append(ci)
+        picked = [
+            (mi, pos)
+            for mi, (start, end) in enumerate(spans)
+            for pos in evenly_spaced_positions(start, end, config.TOKENS_PER_TURN)
+        ]
+        hidden = capture.run(
+            m, ids, device, what=("hidden_states",), positions=[pos for _, pos in picked]
+        )["hidden_states"]
+        for col, (mi, _pos) in enumerate(picked):
+            speaker_X.append(hidden[:, col, :].astype(np.float16))
+            speaker_y.append(0 if messages[mi]["role"] == "user" else 1)
+            speaker_conv.append(ci)
     print(f"speaker: {len(speaker_X)} tokens from {args.n} conversations")
 
     yes_id, no_id = answer_token_ids(tokenizer)
     n_layers, d_model = m.cfg.n_layers, m.cfg.d_model
-    del m  # release ~1.5 GB before writing ~160 MB to a disk with little headroom
+    del m  # release the weights (16-32 GB at 8B) before writing the capture
     if device == "mps":
         torch.mps.empty_cache()
 
@@ -128,6 +144,7 @@ def main():
     meta = {
         "model": args.model,
         "device": device,
+        "dtype": args.dtype,
         "trait": args.trait,
         "n_vector": args.n_vector,
         "vector_offset": config.VECTOR_OFFSET,
