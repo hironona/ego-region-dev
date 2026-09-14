@@ -1,8 +1,8 @@
 # ego_region
 
-Interpretability pipelines over activation geometry. First experiment:
-**self_user_geometry** — do "self" (assistant) and "user" role tokens occupy
-separable regions of a model's activation space?
+Where does a chat model represent *who is speaking*, and is that representation load-bearing?
+Four experiments on `Qwen/Qwen3-0.6B`: probe for the user/assistant direction, localise it by
+ablation, then test whether a trait steering vector interacts with the boundary it defines.
 
 ## Setup
 
@@ -10,46 +10,45 @@ separable regions of a model's activation space?
 uv sync
 ```
 
-Default model is `Qwen/Qwen3-0.6B` on `mps` (auto-detected; `--device cpu|cuda|mps` overrides).
+Device is auto-detected; `--device cpu|cuda|mps` overrides. Use `cpu` or `cuda` for real
+runs — TransformerLens reports MPS can be silently wrong.
 
-## Run
+## Experiments
 
-Capture (loads the model once, writes raw activations to disk):
+| folder | question | headline |
+|---|---|---|
+| `speaker_probe` | is user vs assistant linearly decodable from the residual stream? | ~0.98 balanced accuracy from layer 1; the direction is near-orthogonal to the top PCs |
+| `mean_ablation_probe` | which blocks write it? | attention blocks 0–4 |
+| `head_ablation_sweep` | which heads? | per-head sweep over that window |
+| `steering_boundary` | does trait steering bend near the probe's boundary `w·h + b = 0`? | open — see `docs/HANDOFF.md` |
+
+Each runs the same way: a capture step that loads the model, then analysis that only reads
+the saved `.npz`, so plots are free to regenerate.
 
 ```bash
-uv run python -m experiments.self_user_geometry.run_capture --prompt "Who are you, and who am I?"
+uv run python -m experiments.speaker_probe.run_capture
+uv run python -m experiments.speaker_probe.analyze
 ```
 
-Analyse (no model load — reruns freely on the saved capture):
+`steering_boundary` has an extra sweep step between the two, and `analyze` is run twice —
+once to build the vector and size the grid, once after the sweep:
 
 ```bash
-uv run python -m experiments.self_user_geometry.analyze
+uv run python -m experiments.steering_boundary.run_capture --device cuda
+uv run python -m experiments.steering_boundary.analyze          # writes vectors.npz
+uv run python -m experiments.steering_boundary.run_steer --device cuda
+uv run python -m experiments.steering_boundary.analyze          # plots + results.json
 ```
 
-Outputs land in `experiments/self_user_geometry/outputs/`:
-`capture.npz` + `capture.meta.json`, and `plots/*.png`.
+Outputs land in `experiments/<name>/outputs/` (gitignored): captures plus `plots/*.png`.
+Captures are large — 160 MB to 1.3 GB per experiment.
 
 ## What is captured
 
-Per forward pass, for the chat-templated prompt:
-
-| array | shape | contents |
-|---|---|---|
-| `hidden_states` | `(L+1, T, D)` | residual stream: index 0 is the embedding output, then `resid_post` of each layer (last row is pre-final-norm) |
-| `attentions` | `(L, H, T, T)` | attention weights, from `hook_pattern` |
-| `values` | `(L, T, D_kv)` | value vectors, from `hook_v` (GQA heads flattened) |
-
-`capture.meta.json` records the templated text, token strings, and the **role-token
-positions**, found by locating `<|im_start|>` in the tokenized prompt and reading the
-token that actually follows it — verified against the tokenizer, not hardcoded. For
-Qwen3 that resolves to `user` (id 872) and `assistant` (id 77091).
-
-## Plots
-
-- `layer_trajectories.png` — role tokens' path through a shared hidden-state PCA space, layer by layer (2D + 3D)
-- `tokens_by_layer.png` — all tokens at first/middle/last layer, role tokens highlighted
-- `value_directions.png` — value-vector directions at the role tokens in value-space PCA, plus their per-layer cosine similarity
-- `role_attention.png` — attention received by each role token per layer
+Per forward pass: `hidden_states` `(L+1, T, D)` (index 0 is the embedding output, then each
+layer's `resid_post`), `attentions` `(L, H, T, T)`, `values` `(L, T, D_kv)`, and `logits`
+`(T, V)` — selected via `what=`, with optional write hooks for ablation and steering. A
+sidecar `.meta.json` records the templated text, token strings and label positions.
 
 ## Checks
 
@@ -57,15 +56,11 @@ Qwen3 that resolves to `user` (id 872) and `assistant` (id 77091).
 uv run python test_pipeline.py
 ```
 
-Covers role-token resolution against the real tokenizer, per-layer normalisation,
-npz round-trip, and capture shapes (including that attention rows are causal and
-sum to 1).
+11 asserts covering npz round-trip, capture shapes, the two Qwen3 `<think>` template
+quirks, the lexical-confound control, and that each intervention touches exactly the
+tokens it claims to.
 
-## Structure
+## More
 
-Capture runs on TransformerLens `HookedTransformer` (loaded with
-`from_pretrained_no_processing`, so activations match a plain HF forward pass).
-
-`core/` is experiment-agnostic (model loading, hooks, capture, storage);
-`experiments/<name>/` holds one experiment each. See [CLAUDE.md](CLAUDE.md) before
-adding a new one.
+`docs/HANDOFF.md` — findings, traps, and open items. [CLAUDE.md](CLAUDE.md) — architecture
+rules; read before adding an experiment.
