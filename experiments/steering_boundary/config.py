@@ -52,7 +52,13 @@ VECTOR_OFFSET = N_EVAL
 STEER_POSITIONS = "all"
 
 STEER_LAYERS = (4, 8, 12, 16, 20, 24)
-COEFFS = np.linspace(-30, 30, 21)  # wide enough to contain median a* at every swept layer
+# Sized against the vector, not against a*. |v| is a consistent ~15% of the
+# residual-stream norm at every swept layer, so alpha ~ 3 already pushes by half
+# that norm and the old +-30 grid spent 19 of its 21 points where the activation
+# is effectively replaced by the vector. Step 0.5 puts seven points inside the
+# +-1.5 window that raw difference-in-means vectors are usually driven over
+# (Tan et al. 2024; CAA uses +-1), while +-6 still reaches ~0.9x the residual norm.
+COEFFS = np.linspace(-6, 6, 25)
 
 HERE = Path(__file__).parent
 CAPTURE_PATH = HERE / "outputs" / "capture.npz"

@@ -265,6 +265,10 @@ def main():
         "target_choice_acc": steer["acc"].tolist(),
         "fraction_crossed": steer["crossed"].tolist(),
     }
+    # Mean logit(target) - logit(other). Absent from sweeps run before it was
+    # recorded, so it is optional here rather than a hard key.
+    if "margin" in steer:
+        summary["target_logit_margin"] = steer["margin"].tolist()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "results.json").write_text(json.dumps(summary, indent=2))
     print(f"wrote {out_dir / 'results.json'}")

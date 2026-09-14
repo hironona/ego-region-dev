@@ -82,6 +82,13 @@ def main():
 
     acc = np.zeros((len(args.layers), len(coeffs)))
     crossed = np.zeros((len(args.layers), len(coeffs)))
+    # Insurance against the metric, not a second result. acc is a hard argmax
+    # between two fixed tokens and throws the magnitude away, so a real but
+    # sub-threshold push reads as a flat curve. The signed margin toward the
+    # target choice is the same measurement without the thresholding, and
+    # recording it here costs one subtraction per prompt -- far cheaper than
+    # discovering afterwards that the whole sweep has to be run again.
+    margin = np.zeros((len(args.layers), len(coeffs)))
     for i, k in enumerate(args.layers):
         v = torch.tensor(V[k], dtype=torch.float32, device=device)
         w_k, b_k = W[k], B[k]
@@ -91,6 +98,7 @@ def main():
                 else [(hook_name(k), add_vector(c * v, args.steer_positions))]
             )
             chose_yes = np.empty(len(prompts), dtype=bool)
+            gap = np.empty(len(prompts), dtype=np.float64)
             n_past, n_total = 0, 0
             for n, ids in enumerate(prompts):
                 out = capture.run(
@@ -99,6 +107,8 @@ def main():
                 )
                 logits = out["logits"]
                 chose_yes[n] = logits[-1, yes_id] > logits[-1, no_id]
+                yes_minus_no = float(logits[-1, yes_id] - logits[-1, no_id])
+                gap[n] = yes_minus_no if target_yes[n] else -yes_minus_no
                 # Count only the activations that were actually steered, so the
                 # ratio means "of the things we pushed, how many are now on the
                 # assistant side". Measured rather than extrapolated from
@@ -112,14 +122,16 @@ def main():
                 n_total += z.size
             acc[i, j] = float((chose_yes == target_yes).mean())
             crossed[i, j] = n_past / n_total
+            margin[i, j] = float(gap.mean())
         print(f"layer {k} acc:     " + " ".join(f"{a:.2f}" for a in acc[i]))
         print(f"layer {k} crossed: " + " ".join(f"{a:.2f}" for a in crossed[i]))
+        print(f"layer {k} margin:  " + " ".join(f"{a:+.2f}" for a in margin[i]))
 
     capture.save(
         args.out,
         {
             "layers": np.array(args.layers), "coeffs": coeffs,
-            "acc": acc, "crossed": crossed,
+            "acc": acc, "crossed": crossed, "margin": margin,
         },
         {
             **meta, "steer_positions": args.steer_positions,

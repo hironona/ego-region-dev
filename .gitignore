@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 experiments/*/outputs/
 *.DS_Store
+slurm/logs/*.out
+slurm/logs/*.err
