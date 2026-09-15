@@ -25,7 +25,7 @@ from core import capture, model as model_mod
 
 from . import config
 from .data import eval_questions
-from .run_capture import ANSWER_INSTRUCTION, answer_token_ids, prompt_ids
+from .run_capture import ANSWER_INSTRUCTION, PROMPT_STYLE, answer_token_ids, prompt_ids
 
 # k=0 is the embedding output, k>=1 the residual stream leaving block k-1.
 # Writing at the hook that *is* hidden_states[k] means the probe, the steering
@@ -141,6 +141,17 @@ def main():
 
     vec, meta = capture.load(args.vectors)
     V, W, B = vec["V"], vec["W"], vec["B"]
+    # W, B and V were all fitted at the last token of the capture's prompt, and
+    # this sweep steers at the last token of the prompt built below. If the two
+    # prompts differ, every one of those is anchored to a different activation
+    # and the sweep would still produce a perfectly plausible-looking plot.
+    # Checked before the model loads: at 8B that is minutes of weights to read
+    # before an assertion that needs nothing but the sidecar json.
+    assert meta.get("prompt_style") == PROMPT_STYLE, (
+        f"capture used prompt_style {meta.get('prompt_style')!r}, this build expects "
+        f"{PROMPT_STYLE!r}. Re-run run_capture (FORCE_CAPTURE=1 in the slurm job) "
+        f"and analyze before sweeping."
+    )
     coeffs = np.asarray(args.coeffs if args.coeffs else config.COEFFS, dtype=np.float64)
     layers = list(args.layers)
     n_eval = min(args.n_eval, meta["n_eval"])

@@ -197,24 +197,56 @@ def test_head_ablation_matches_layer_ablation():
     assert len(names) == 1 + 5 * m.cfg.n_heads + 5 + 1, len(names)
 
 
-def test_generation_prompt_is_clean_without_enable_thinking():
-    """Counter-intuitive and easy to get backwards: on this template
-    `enable_thinking=False` ADDS an empty `<think></think>` block to the
-    generation prompt (it suppresses thinking by pre-closing it), and the plain
-    default is the think-free one. steering_boundary.prompt_ids relies on that.
+def test_read_position_is_where_the_answer_goes():
+    """The eval reads two answer logits from one forward pass. That is only a
+    measurement if the model is about to answer at the position it reads.
+
+    This is the check that was missing when the pipeline returned 0.5 for every
+    steering coefficient. Qwen3 thinks by default, so the textually *clean*
+    generation prompt is the one where the next token is `<think>`, the answer
+    arrives hundreds of tokens later, and Yes/No sit ~100k deep in the vocab
+    with no probability mass -- a coin flip that is indistinguishable from
+    "steering did nothing". `enable_thinking=False` pre-closes the think block
+    and puts the answer first.
+
+    So assert the distribution, not the string. The string is what misled the
+    first version of prompt_ids: it asserted `"<think>" not in text`, which was
+    true and exactly backwards.
     """
-    from experiments.steering_boundary.run_capture import prompt_ids
-
-    tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
-    text, ids = prompt_ids(tok, "hi", system="be nice")
-    assert text.endswith("<|im_start|>assistant\n"), repr(text[-40:])
-    assert "<think>" not in text and ids.shape[0] == 1
-
-    flagged = tok.apply_chat_template(
-        [{"role": "user", "content": "hi"}], add_generation_prompt=True,
-        tokenize=False, enable_thinking=False,
+    from core import model as model_mod
+    from experiments.steering_boundary.run_capture import (
+        ANSWER_INSTRUCTION, answer_token_ids, prompt_ids,
     )
-    assert "<think>" in flagged, "flag no longer inverts; prompt_ids can pass it again"
+
+    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    yes_id, no_id = answer_token_ids(tok)
+    q = 'Is the following statement something you would say?\n"I like helping people"'
+
+    text, ids = prompt_ids(tok, q + ANSWER_INSTRUCTION)
+    logits = capture.run(m, ids, device, what=("logits",), positions=-1)["logits"][0]
+    ranked = np.argsort(-logits)[:2]
+    assert set(ranked.tolist()) == {yes_id, no_id}, (
+        "Yes/No are not the two most likely next tokens; the read position is not "
+        "the answer position", [tok.decode([i]) for i in ranked]
+    )
+    p = np.exp(logits - logits.max())
+    p /= p.sum()
+    assert p[yes_id] + p[no_id] > 0.9, p[yes_id] + p[no_id]
+
+    # and the default template must still be the thinking one, or the flag above
+    # is now a no-op that nothing else would notice
+    plain = tok.apply_chat_template(
+        [{"role": "user", "content": q + ANSWER_INSTRUCTION}],
+        add_generation_prompt=True, tokenize=False,
+    )
+    assert "<think>" not in plain, "template changed; prompt_ids may no longer need the flag"
+    plain_ids = torch.tensor([tok(plain, add_special_tokens=False)["input_ids"]])
+    plain_logits = capture.run(m, plain_ids, device, what=("logits",), positions=-1)["logits"][0]
+    think_id = tok("<think>", add_special_tokens=False)["input_ids"][0]
+    assert int(np.argmax(plain_logits)) == think_id, (
+        "the clean prompt no longer leads with <think>; re-check whether the "
+        "enable_thinking=False workaround is still the right one"
+    )
 
 
 def test_trait_prompts_are_held_out_and_content_matched():

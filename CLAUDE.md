@@ -51,12 +51,20 @@ keep prompt/role/analysis choices in the experiment.
   `k>=1` is the residual stream leaving block `k-1` (last row is pre-final-norm). Probe,
   steering vector and intervention hook must all refer to the same `k` — see
   `run_steer.hook_name(k)`.
-- **Verify tokenizer facts, don't assume them.** Qwen3's chat template has two opposite
-  `<think>` behaviours: in conversation *history* it injects an empty block into the last
-  assistant message and `enable_thinking=False` does not remove it (worked around by
-  appending an empty user turn and truncating); in a *generation prompt* the default is
-  clean and `enable_thinking=False` *adds* the block. Both are pinned by tests — if a
-  template update breaks them, fix the code, not the test.
+- **Verify tokenizer facts, don't assume them — then check what they do to the
+  model.** Qwen3's chat template has two opposite `<think>` behaviours: in conversation
+  *history* it injects an empty block into the last assistant message and
+  `enable_thinking=False` does not remove it (worked around by appending an empty user
+  turn and truncating); in a *generation prompt* the default is clean and
+  `enable_thinking=False` *adds* the block. Both are pinned by tests — if a template
+  update breaks them, fix the code, not the test.
+  The second fact is a trap, and the eval fell into it for a while: Qwen3 thinks by
+  default, so the *clean* generation prompt is the one the model answers by emitting
+  `<think>` and reasoning for hundreds of tokens. Reading answer logits there samples
+  the tail of the distribution (Yes/No near rank 100k, ~0 probability) and yields a
+  flat 0.5 that is indistinguishable from a null result. `enable_thinking=False` is
+  what puts the answer at the read position. Assert on the model's distribution, not
+  on the prompt string — a clean string is not a think-free model.
 - **Capture goes through TransformerLens.** `core.model.load` returns a
   `HookedTransformer`, and `core.capture.run` reads named hooks
   (`blocks.0.hook_resid_pre` + `blocks.{l}.hook_resid_post`, `attn.hook_pattern`,

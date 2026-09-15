@@ -31,7 +31,10 @@
 # fail on a cache miss otherwise.
 #
 # Knobs, all optional, set on the sbatch line as --export:
-#   FORCE_CAPTURE=1        redo step 1 even if capture.npz exists
+#   FORCE_CAPTURE=1        redo step 1 even if capture.npz exists. Needed after
+#                          any change to the prompt: step 3 refuses a capture
+#                          whose prompt_style does not match rather than
+#                          steering activations it was not fitted on.
 #   DTYPE=bfloat16         halve the memory and roughly halve the time, at the
 #                          cost of float32 reference numerics
 #   STEER_ARGS="..."       extra args for run_steer, e.g. a smaller grid:

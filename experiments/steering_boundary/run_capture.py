@@ -24,22 +24,42 @@ from .data import contrastive_pairs, eval_questions
 
 ANSWER_INSTRUCTION = "\n\nAnswer with a single word, Yes or No."
 
+# Identifies the prompt the model was shown. Everything downstream -- the
+# steering vector, alpha*, the Yes/No readout -- is measured at the last token
+# of that prompt, so a capture built under one style cannot be swept under
+# another. run_steer refuses the mismatch rather than producing a plausible
+# plot from two incompatible halves. Bump this whenever prompt_ids changes.
+PROMPT_STYLE = "qwen3-nothink-generation-prompt"
+
 
 def prompt_ids(tokenizer, user, system=None):
-    """Think-free chat prompt ending at the assistant generation header.
+    """Chat prompt ending where the model's *answer* begins.
 
-    Note the missing `enable_thinking=False`: on this template that flag *adds*
-    an empty `<think>\\n\\n</think>` block to the generation prompt (it suppresses
-    thinking by pre-closing it), while the default leaves the header clean. The
-    assert is what caught that, so it stays.
+    `enable_thinking=False` appends an already-closed `<think>\\n\\n</think>`
+    block to the generation prompt, and that block is the entire point. Qwen3
+    thinks by default, so without it the next token here is `<think>` at logit
+    ~30, the model goes on to reason for hundreds of tokens, and Yes/No sit
+    around rank 100k of 151936 carrying a combined probability of 0.0000. An
+    eval reading two answer logits from that position is sampling the tail of
+    the distribution -- it returns ~0.5 for every steering coefficient, which
+    looks exactly like "steering did nothing". With the block pre-closed, Yes
+    and No are ranks 0 and 1 and hold essentially all the mass.
+
+    This function previously asserted the opposite, reasoning from the true but
+    misleading observation that the default template is textually clean. Clean
+    text is not a think-free model: the clean prompt is precisely the one the
+    model answers by starting to think. So the assert below pins the string that
+    produces the right *behaviour*, and test_read_position_is_where_the_answer_goes
+    pins the behaviour itself -- if a template update ever moves the answer
+    somewhere else, that test is what fails.
     """
     msgs = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": user}
     ]
     text = tokenizer.apply_chat_template(
-        msgs, add_generation_prompt=True, tokenize=False
+        msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False
     )
-    assert "<think>" not in text, text
+    assert text.endswith("<think>\n\n</think>\n\n"), repr(text[-40:])
     return text, torch.tensor([tokenizer(text, add_special_tokens=False)["input_ids"]])
 
 
@@ -145,6 +165,7 @@ def main():
         "model": args.model,
         "device": device,
         "dtype": args.dtype,
+        "prompt_style": PROMPT_STYLE,
         "trait": args.trait,
         "n_vector": args.n_vector,
         "vector_offset": config.VECTOR_OFFSET,
