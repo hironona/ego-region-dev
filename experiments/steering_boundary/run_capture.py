@@ -3,7 +3,9 @@
 
 Captures three things in one file, all indexed by the same layer axis k
 (hidden_states[k]):
-  contrast_X / contrast_y  trait vs neutral system prompt, for the vector
+  contrast_X / contrast_y  the two sides of the contrast the vector is built from
+                           (config.VECTOR_METHOD: trait vs other answer token, or
+                           trait vs neutral system prompt)
   speaker_X / speaker_y    user vs assistant tokens, for the probe boundary
   eval_X                   unsteered read position of each MCQ, for alpha*
 
@@ -20,7 +22,7 @@ from experiments.speaker_probe.conversations import build
 from experiments.speaker_probe.run_capture import build_input, evenly_spaced_positions
 
 from . import config
-from .data import contrastive_pairs, eval_questions
+from .data import caa_pairs, contrastive_pairs, eval_questions
 
 ANSWER_INSTRUCTION = "\n\nAnswer with a single word, Yes or No."
 
@@ -70,6 +72,40 @@ def answer_token_ids(tokenizer):
     return ids
 
 
+def answered_ids(tokenizer, question, answer):
+    """The eval prompt for `question` with `answer` ("Yes"/"No") appended as the
+    model's first answer token.
+
+    Appends the token id rather than re-tokenising the text: the id is the one
+    the eval reads as that answer (answer_token_ids), so the position read for the
+    vector is exactly the token the eval scores. The prefix is the eval prompt
+    token for token, which is what makes the two prompts of a CAA pair differ in
+    the final token only.
+    """
+    yes_id, no_id = answer_token_ids(tokenizer)
+    _, ids = prompt_ids(tokenizer, question + ANSWER_INSTRUCTION)
+    answer_id = {"Yes": yes_id, "No": no_id}[answer]
+    return torch.cat([ids, torch.tensor([[answer_id]])], dim=1)
+
+
+def contrast_prompts(tokenizer, method, trait, eval_set, n_vector):
+    """[(ids, label)] for the steering-vector contrast. Both methods read the
+    last position of `ids`. For "caa" that is the answer token. For
+    "system_prompt" it is the generation header, the eval's read position."""
+    if method == "caa":
+        return [
+            (answered_ids(tokenizer, q, a), label)
+            for q, a, label in caa_pairs(eval_set, n_vector, config.DATA_DIR, config.VECTOR_OFFSET)
+        ]
+    if method == "system_prompt":
+        return [
+            (prompt_ids(tokenizer, q + ANSWER_INSTRUCTION, system)[1], label)
+            for system, q, label in contrastive_pairs(
+                trait, eval_set, n_vector, config.DATA_DIR, config.VECTOR_OFFSET)
+        ]
+    raise ValueError(f"unknown vector method {method!r}")
+
+
 def last_token_hidden(m, ids, device):
     """(L+1, D) residual stream at the final prompt position, fp16.
 
@@ -90,7 +126,10 @@ def main():
     p.add_argument("--model", default=config.MODEL_NAME)
     p.add_argument("--device", default=config.DEVICE)
     p.add_argument("--dtype", default=config.DTYPE, choices=("float32", "bfloat16", "float16"))
-    p.add_argument("--trait", default=config.TRAIT, help="key into data.TRAIT_SYSTEM")
+    p.add_argument("--vector-method", default=config.VECTOR_METHOD,
+                   choices=("caa", "system_prompt"))
+    p.add_argument("--trait", default=config.TRAIT,
+                   help="key into data.TRAIT_SYSTEM (system_prompt method only)")
     p.add_argument("--n-vector", type=int, default=config.N_VECTOR)
     p.add_argument("--eval-set", default=config.EVAL_SET)
     p.add_argument("--n-eval", type=int, default=config.N_EVAL)
@@ -103,18 +142,14 @@ def main():
     )
 
     # --- 1. contrastive pairs -> steering vector material ---
-    # Same read position as the eval below (the generation header), so the vector
-    # and the thing it is meant to move live at the same place in the stream.
     contrast_X, contrast_y = [], []
-    for system, question, label in contrastive_pairs(
-        args.trait, args.eval_set, args.n_vector, config.DATA_DIR, config.VECTOR_OFFSET
+    for ids, label in contrast_prompts(
+        tokenizer, args.vector_method, args.trait, args.eval_set, args.n_vector
     ):
-        _, ids = prompt_ids(tokenizer, question + ANSWER_INSTRUCTION, system)
         contrast_X.append(last_token_hidden(m, ids, device))
         contrast_y.append(label)
-    print(f"contrastive: {len(contrast_X)} prompts, trait={args.trait} "
-          f"on {args.eval_set} rows [{config.VECTOR_OFFSET}:"
-          f"{config.VECTOR_OFFSET + args.n_vector}]")
+    print(f"contrastive ({args.vector_method}): {len(contrast_X)} prompts on "
+          f"{args.eval_set} rows from {config.VECTOR_OFFSET}")
 
     # --- 2. eval prompts, unsteered ---
     rows = eval_questions(args.eval_set, args.n_eval, config.DATA_DIR)
@@ -166,7 +201,9 @@ def main():
         "device": device,
         "dtype": args.dtype,
         "prompt_style": PROMPT_STYLE,
-        "trait": args.trait,
+        "vector_method": args.vector_method,
+        # CAA has no persona prompt: its "trait" is the eval's non-matching answer.
+        "trait": args.trait if args.vector_method == "system_prompt" else f"anti-{args.eval_set}",
         "n_vector": args.n_vector,
         "vector_offset": config.VECTOR_OFFSET,
         "eval_set": args.eval_set,
@@ -178,7 +215,8 @@ def main():
         "no_id": no_id,
         "seed": config.SEED,
         "label_convention": (
-            "contrast_y: 1=trait system prompt, 0=neutral. speaker_y: 0=user, "
+            "contrast_y: 1=trait (caa: answer_not_matching_behavior token; "
+            "system_prompt: trait system prompt), 0=the other. speaker_y: 0=user, "
             "1=assistant. target choice = answer_not_matching_behavior of the "
             "eval set (trait-consistent)."
         ),

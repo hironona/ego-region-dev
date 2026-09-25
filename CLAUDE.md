@@ -21,7 +21,7 @@ Current experiments, in the order they were built:
 | `speaker_probe` | is user vs assistant linearly decodable from the residual stream? (~0.98 bal. acc from L1) | `conversations.py` — the shared synthetic-dialogue builder |
 | `mean_ablation_probe` | which blocks write that signal? mean-ablate a sliding attn/MLP window and re-probe | — |
 | `head_ablation_sweep` | narrows the implicated window to individual heads (`hook_z`) | — |
-| `steering_boundary` | does a trait steering vector start changing behaviour near the probe's boundary? | `data.py` (trait prompts + anthropics/evals), `run_steer.py` (second model-loading step) |
+| `steering_boundary` | does a trait steering vector start changing behaviour near the probe's boundary? | `data.py` (CAA answer pairs, legacy trait prompts, anthropics/evals), `run_steer.py` (second model-loading step) |
 
 `docs/HANDOFF.md` is the running research log: what has actually been measured, what is
 still unverified, and the open items. Read it before drawing conclusions from any plot.

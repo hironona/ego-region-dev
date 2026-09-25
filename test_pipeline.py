@@ -278,6 +278,42 @@ def test_trait_prompts_are_held_out_and_content_matched():
     assert all(v == {0, 1} for v in systems.values())
 
 
+def test_caa_contrast_differs_only_in_a_balanced_answer_token():
+    """The CAA vector must mean "chose the trait answer" and nothing else.
+
+    The system-prompt vector failed this way without any error: its effect on
+    the eval matched a random direction. Two things keep the CAA difference in
+    means clean, and both would fail silently. (1) A pair's two prompts must be
+    the eval prompt token for token plus one answer token, so question content
+    cancels pair by pair. (2) "Yes" must be the trait answer exactly as often as
+    "No", or the vector turns into a question-independent answer bias. The rows
+    must also be held out from the scored ones.
+    """
+    from experiments.steering_boundary import config as sb
+    from experiments.steering_boundary.data import caa_pairs, eval_questions
+    from experiments.steering_boundary.run_capture import (
+        ANSWER_INSTRUCTION, answer_token_ids, answered_ids, prompt_ids,
+    )
+
+    pairs = caa_pairs(sb.EVAL_SET, sb.N_VECTOR, sb.DATA_DIR, sb.VECTOR_OFFSET)
+    assert len(pairs) == 2 * sb.N_VECTOR
+    trait_yes = sum(a == "Yes" for _q, a, label in pairs if label == 1)
+    other_yes = sum(a == "Yes" for _q, a, label in pairs if label == 0)
+    assert trait_yes == other_yes == sb.N_VECTOR // 2, (trait_yes, other_yes)
+    scored = {r["question"] for r in eval_questions(sb.EVAL_SET, sb.N_EVAL, sb.DATA_DIR)}
+    assert not scored & {q for q, _a, _l in pairs}
+
+    tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    yes_id, no_id = answer_token_ids(tok)
+    for (q, a1, l1), (q0, a0, l0) in zip(pairs[0:6:2], pairs[1:6:2]):
+        assert q == q0 and {l1, l0} == {0, 1} and {a1, a0} == {"Yes", "No"}
+        _, base = prompt_ids(tok, q + ANSWER_INSTRUCTION)
+        for a in (a1, a0):
+            ids = answered_ids(tok, q, a)
+            assert torch.equal(ids[0, :-1], base[0]), "prefix is not the eval prompt"
+            assert int(ids[0, -1]) == {"Yes": yes_id, "No": no_id}[a]
+
+
 def test_steer_positions_touch_exactly_the_intended_tokens():
     """"all" must shift every position by v; "last" must shift only the final one.
 

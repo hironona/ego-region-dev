@@ -1,6 +1,15 @@
 """Contrastive prompts for the trait vector + the persona MCQ eval. No model, no torch.
 
-Two design choices, both reactions to a null result:
+Two ways to build the contrast, selected by config.VECTOR_METHOD:
+
+- caa_pairs: the eval's own questions followed by each of the two answers, read
+  at the answer token. This is the default.
+- contrastive_pairs: the same questions under a trait vs a neutral system prompt.
+  This was the method until it turned out not to steer (see config.py). It is
+  kept so the old result can be reproduced. The notes below explain why it was
+  built that way.
+
+Two design choices behind contrastive_pairs, both reactions to a null result:
 
 1. The trait is elicited by a *system prompt*, not read off the eval's own answer
    tokens. An answer-token contrast only ever separates "Yes" from "No"; what we
@@ -45,6 +54,21 @@ NEUTRAL_SYSTEM = "You are a helpful assistant. Answer honestly."
 EVAL_URL = "https://raw.githubusercontent.com/anthropics/evals/main/persona/{name}.jsonl"
 
 
+def _all_rows(name: str, cache_dir: Path):
+    """Every row of the anthropics/evals persona eval `name`, downloaded once."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{name}.jsonl"
+    if not path.exists():
+        with urllib.request.urlopen(EVAL_URL.format(name=name), context=_SSL) as r:
+            path.write_bytes(r.read())
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for r in rows:
+        a, b = r["answer_matching_behavior"].strip(), r["answer_not_matching_behavior"].strip()
+        assert {a, b} == {"Yes", "No"}, r
+    return rows
+
+
 def eval_questions(name: str, n: int, cache_dir: Path, offset: int = 0):
     """n rows of the anthropics/evals persona eval `name`, starting at `offset`.
 
@@ -53,19 +77,43 @@ def eval_questions(name: str, n: int, cache_dir: Path, offset: int = 0):
     steering is answer_not_matching_behavior: steering an agreeableness eval with a
     callousness vector should push the model off the agreeable answer.
     """
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{name}.jsonl"
-    if not path.exists():
-        with urllib.request.urlopen(EVAL_URL.format(name=name), context=_SSL) as r:
-            path.write_bytes(r.read())
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    rows = rows[offset : offset + n]
+    rows = _all_rows(name, cache_dir)[offset : offset + n]
     assert len(rows) == n, f"{name}: wanted {n} rows from offset {offset}, got {len(rows)}"
-    for r in rows:
-        a, b = r["answer_matching_behavior"].strip(), r["answer_not_matching_behavior"].strip()
-        assert {a, b} == {"Yes", "No"}, r
     return rows
+
+
+def caa_pairs(eval_set: str, n: int, cache_dir: Path, offset: int):
+    """[(question, answer, label)] for n held-out questions, label 1 = trait answer.
+
+    Each question appears twice, once followed by answer_not_matching_behavior
+    (label 1, the callous choice) and once by answer_matching_behavior (label 0).
+    The vector is the difference in means *at the answer token*. Two properties
+    make that difference mean "chose the trait answer" and nothing else:
+
+    - The two prompts of a question differ only in the answer token, so the
+      question content cancels out pair by pair.
+    - The trait answer is "Yes" for exactly n/2 questions and "No" for the other
+      n/2. Each class therefore holds the same number of "Yes" tokens, and the
+      answer word cancels out of the mean. Without this, a key that leans towards
+      one answer turns the vector into a Yes/No bias, which is exactly the
+      question-independent push the old vector produced.
+
+    Questions are taken in file order from rows[offset:], so they never overlap
+    the scored rows [0:offset].
+    """
+    assert n % 2 == 0, f"n={n} must be even to balance Yes and No"
+    picked = {"Yes": [], "No": []}
+    for r in _all_rows(eval_set, cache_dir)[offset:]:
+        bucket = picked[r["answer_not_matching_behavior"].strip()]
+        if len(bucket) < n // 2:
+            bucket.append(r)
+    got = {k: len(v) for k, v in picked.items()}
+    assert got == {"Yes": n // 2, "No": n // 2}, f"{eval_set}: not enough rows past {offset}: {got}"
+    pairs = []
+    for r in picked["Yes"] + picked["No"]:
+        pairs.append((r["question"], r["answer_not_matching_behavior"].strip(), 1))
+        pairs.append((r["question"], r["answer_matching_behavior"].strip(), 0))
+    return pairs
 
 
 def contrastive_pairs(trait: str, eval_set: str, n: int, cache_dir: Path, offset: int):

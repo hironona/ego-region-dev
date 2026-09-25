@@ -37,10 +37,21 @@ TOKENS_PER_TURN = 2
 POOL = "shared"
 
 # --- steering vector ---
-# One trait, elicited by a system prompt over held-out questions from the eval
-# itself. Difference in means between the trait prompt and a neutral one.
-TRAIT = "psychopathy"  # key into data.TRAIT_SYSTEM
-N_VECTOR = 80  # held-out eval items, each contributing a trait and a neutral prompt
+# "caa": contrastive activation addition on the eval's own answer tokens. Each
+#   held-out question is followed by the trait-consistent answer (label 1) and by
+#   the other answer (label 0), and the residual stream is read *at the answer
+#   token*. Rows are chosen so "Yes" is the trait answer exactly as often as "No",
+#   so the answer word cancels out of the difference in means and what is left is
+#   "gave the callous answer".
+# "system_prompt": the earlier method, kept so the old result stays reproducible.
+#   Trait vs neutral system prompt, read at the last prompt token. On Qwen3-8B the
+#   prompt itself flips 98% of answers, but the vector it yields does not: its
+#   effect on the eval was indistinguishable from a random direction of the same
+#   norm. The flip is question-dependent (Yes on callous statements, No on kind
+#   ones), so on a balanced key it cancels out of the mean; only tone survived.
+VECTOR_METHOD = "caa"
+TRAIT = "psychopathy"  # key into data.TRAIT_SYSTEM; used by "system_prompt" only
+N_VECTOR = 80  # held-out eval items; each contributes one prompt per label
 
 # --- behavioural eval ---
 # anthropics/evals persona set. Yes/No MCQ with a labelled matching answer; we
@@ -64,6 +75,9 @@ VECTOR_OFFSET = N_EVAL
 #   quantity, since there are many activations to count).
 # "last": add it only at the position the answer is read from, so the single
 #   crossing coefficient alpha* stays exact and can be marked as a vertical line.
+#   Not a working alternative on 8B: with the system-prompt vector at layer 18 it
+#   changed no answer at all up to 1.75x the activation norm (presumably the
+#   later layers read the answer off the unsteered prompt tokens via attention).
 STEER_POSITIONS = "all"
 
 # Three layers, not six, and none near either end of the 36 blocks. The sweep
@@ -79,16 +93,28 @@ STEER_POSITIONS = "all"
 # effect worth localising.
 STEER_LAYERS = (12, 18, 24)
 
-# Same +-6 span as before, 15 points instead of 25, spent where the curve can
-# bend. |v| is a consistent ~15% of the residual-stream norm at the swept
-# layers, so step 0.5 is kept inside +-1.5 -- the window raw difference-in-means
-# vectors are usually driven over (Tan et al. 2024; CAA uses +-1) -- and the
-# tail beyond |2| is sampled coarsely, since by then the vector is a large
-# fraction of the activation and the curve is saturated or destroyed, not
-# structured. Must still span the median a* that analyze.py prints, or the
-# boundary marker lands off-grid.
-_HALF = np.array([0.5, 1.0, 1.5, 2.0, 3.0, 4.5, 6.0])
-COEFFS = np.concatenate([-_HALF[::-1], [0.0], _HALF])
+# The grid is in units of the residual stream, not of v: a scale r steers with
+# c = r * |h_k| / |v_k|, where |h_k| is the median norm at the read position of
+# the unsteered eval prompts (vectors.npz "h_norm"). A raw coefficient means
+# something different at every layer and for every vector -- |v|/|h| was ~0.15
+# on 0.6B but 0.17 / 0.29 / 0.36 at layers 12 / 18 / 24 on 8B, so the old +-12
+# grid pushed 2-4x the whole activation and most of it measured a broken model.
+# On 8B the answer format survives up to r ~ 1 and is gone by r ~ 1.7; 1.5 is
+# kept at the edge so the plot shows where that happens.
+_HALF = np.array([0.1, 0.25, 0.5, 0.75, 1.0, 1.5])
+STEER_SCALES = np.concatenate([-_HALF[::-1], [0.0], _HALF])
+
+# Every trait cell is paired with the same coefficient along a random direction
+# of the same norm (seeded by SEED). Steering along *any* large direction pushed
+# 8B towards a question-independent "Yes", so an effect only counts as the
+# trait's if it beats this control. Doubles the steered passes.
+RANDOM_CONTROL = True
+
+# Cells where the median P(Yes) + P(No) at the read position falls below this
+# are not answering the question any more. Their "accuracy" is an argmax between
+# two tail tokens -- on a 50%-Yes key it comes out at exactly 0.5 -- so the plot
+# greys them out instead of drawing them as a result.
+MIN_ANSWER_MASS = 0.5
 
 HERE = Path(__file__).parent
 CAPTURE_PATH = HERE / "outputs" / "capture.npz"

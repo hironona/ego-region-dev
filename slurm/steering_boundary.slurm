@@ -17,10 +17,11 @@
 #
 #   1. run_capture   loads the model, writes capture.npz (~310 MB at 8B)
 #   2. analyze       no model; fits the probe, writes vectors.npz, prints the
-#                    layer table (median a*, |v|) and stops -- steer.npz absent
-#   3. run_steer     loads the model; 3 layers x 15 coefficients x 60 prompts,
-#                    ~2.6k forward passes (the c=0 column is shared across
-#                    layers, so it is one pass per prompt, not one per layer)
+#                    layer table (median a*, |v|/|h|) and stops -- steer.npz absent
+#   3. run_steer     loads the model; 2 kinds (trait + random control) x
+#                    3 layers x 12 non-zero scales x 60 prompts + 60, ~4.4k
+#                    forward passes (the c=0 column is shared by every layer
+#                    and both kinds, so it is one pass per prompt)
 #   4. analyze       same command as 2; now finds steer.npz and writes plots
 #                    plus results.json
 #
@@ -32,13 +33,15 @@
 #
 # Knobs, all optional, set on the sbatch line as --export:
 #   FORCE_CAPTURE=1        redo step 1 even if capture.npz exists. Needed after
-#                          any change to the prompt: step 3 refuses a capture
-#                          whose prompt_style does not match rather than
-#                          steering activations it was not fitted on.
+#                          any change to the prompt or to config.VECTOR_METHOD:
+#                          step 2 refuses a capture built with another vector
+#                          method, and step 3 one whose prompt_style does not
+#                          match, rather than steering what they were not fitted on.
 #   DTYPE=bfloat16         halve the memory and roughly halve the time, at the
 #                          cost of float32 reference numerics
 #   STEER_ARGS="..."       extra args for run_steer, e.g. a smaller grid:
-#                          STEER_ARGS="--layers 18 --coeffs -6 -3 0 3 6"
+#                          STEER_ARGS="--layers 18 --scales -1 -0.5 0 0.5 1"
+#                          or no random control:  STEER_ARGS="--no-control"
 #                          or fewer eval items:  STEER_ARGS="--n-eval 30"
 #
 # deigo is CPU-only. --device cpu is passed explicitly rather than left on
@@ -75,13 +78,14 @@ echo "job $SLURM_JOB_ID on $(hostname), ${SLURM_CPUS_PER_TASK:-?} cpus"
 DTYPE="${DTYPE:-}"
 [[ -n "$DTYPE" ]] && DTYPE_ARG=(--dtype "$DTYPE") || DTYPE_ARG=()
 
-# The grid is no longer uniform -- it is dense inside +-1.5 and coarse outside --
-# so print it rather than a min/max/step that would misdescribe it.
+# The grid is non-uniform and in units of |h| (|c v| / |h|), so print it rather
+# than a min/max/step that would misdescribe it.
 "$PY" -c "from experiments.steering_boundary import config as c; \
 print('model: ', c.MODEL_NAME, '| dtype', c.DTYPE); \
 print('layers:', c.STEER_LAYERS); \
-print('coeffs:', [round(float(x), 2) for x in c.COEFFS]); \
-print('cells: ', len(c.STEER_LAYERS) * (len(c.COEFFS) - 1) * c.N_EVAL + c.N_EVAL, \
+print('vector:', c.VECTOR_METHOD, '| random control', c.RANDOM_CONTROL); \
+print('scales:', [round(float(x), 2) for x in c.STEER_SCALES]); \
+print('cells: ', (1 + c.RANDOM_CONTROL) * len(c.STEER_LAYERS) * (len(c.STEER_SCALES) - 1) * c.N_EVAL + c.N_EVAL, \
 'forward passes over', c.N_EVAL, 'eval prompts')"
 
 if [[ -f "$OUT/capture.npz" && "${FORCE_CAPTURE:-0}" != "1" ]]; then

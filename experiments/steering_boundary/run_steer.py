@@ -1,17 +1,26 @@
-"""vectors.npz -> steer.npz: layer x coefficient sweep of the behavioural effect.
+"""vectors.npz -> steer.npz: layer x scale sweep of the behavioural effect.
 
-Loads the model (analysis never does). For each (layer, coefficient) it adds
-alpha*v to the residual stream at every position and reads which of Yes/No the
-model prefers on each eval question.
+Loads the model (analysis never does). For each (layer, scale) it adds c*v to
+the residual stream at every position, with c = scale * |h_k| / |v_k|, and reads
+which of Yes/No the model prefers on each eval question. The same c is also
+applied along a random direction of the same norm (config.RANDOM_CONTROL), since
+an effect only belongs to the trait vector if it beats that control.
+
+Each cell records more than accuracy, because on a 50%-Yes key accuracy alone
+reads three different things as the same 0.5: a real half-way effect, one
+constant answer, and a model that no longer answers at all. So it also stores
+the accuracy on each half of the key, the Yes-rate, and the median answer mass
+P(Yes) + P(No).
 
 The sweep is layers x coeffs x prompts forward passes and the model is 8B, so
 three things keep it affordable, none of which changes a number that comes out:
   - the c = 0 column is one unsteered pass per prompt, shared by every layer
-    (no hook is registered there, so the forward cannot depend on k);
+    and by both vector kinds (no hook is registered there, so the forward
+    cannot depend on k);
   - each pass captures only the residual stream of the layer being measured,
     not all 37;
   - "last"-position steering also drops every position but the read one.
-config.STEER_LAYERS / COEFFS / N_EVAL carry the rest.
+config.STEER_LAYERS / STEER_SCALES / N_EVAL carry the rest.
 
 Usage: uv run python -m experiments.steering_boundary.run_steer
 """
@@ -54,6 +63,23 @@ def add_vector(v: torch.Tensor, positions: str):
     return fn
 
 
+def random_direction(k, like, seed):
+    """Random unit direction scaled to |like|, fixed by (seed, k).
+
+    Seeded per layer, so the control at layer k does not change when --layers
+    adds or drops another layer.
+    """
+    r = np.random.default_rng([seed, k]).standard_normal(like.shape)
+    return r * (np.linalg.norm(like) / np.linalg.norm(r))
+
+
+def answer_mass(logits, answer_ids):
+    """P(Yes) + P(No) under the full softmax of one logit row."""
+    x = logits.astype(np.float64)
+    lse = x.max() + np.log(np.exp(x - x.max()).sum())
+    return float(np.exp(x[list(answer_ids)] - lse).sum())
+
+
 def score(m, prompts, device, answer_ids, W, B, measure, hooks, steer_positions):
     """Run every eval prompt once and reduce to what a sweep cell records.
 
@@ -62,12 +88,13 @@ def score(m, prompts, device, answer_ids, W, B, measure, hooks, steer_positions)
     pass measures all of them at once, which is free — the forward does not
     depend on k when no hook is registered.
 
-    Returns (chose_yes, gap, crossed) where gap is the signed Yes-minus-No logit
-    margin and crossed maps each k to the fraction of *steered* activations now
-    on the assistant side of z = 0. Counting only what was pushed is what makes
-    that ratio mean "of the things we moved, how many are past the boundary";
-    measuring it rather than extrapolating z0 + c*(w.v) is algebraically the
-    same at layer k but needs no assumption and survives a change to the hook.
+    Returns (chose_yes, gap, mass, crossed). gap is the signed Yes-minus-No logit
+    margin, mass is P(Yes)+P(No) per prompt, and crossed maps each k to the
+    fraction of *steered* activations now on the assistant side of z = 0.
+    Counting only what was pushed is what makes that ratio mean "of the things we
+    moved, how many are past the boundary". Measuring it, rather than
+    extrapolating z0 + c*(w.v), gives the same number at layer k but needs no
+    assumption and keeps working if the hook changes.
     """
     yes_id, no_id = answer_ids
     # "last" reads and steers one position, so nothing else needs to come back.
@@ -77,6 +104,7 @@ def score(m, prompts, device, answer_ids, W, B, measure, hooks, steer_positions)
 
     chose_yes = np.empty(len(prompts), dtype=bool)
     gap = np.empty(len(prompts), dtype=np.float64)
+    mass = np.empty(len(prompts), dtype=np.float64)
     past = np.zeros(len(measure), dtype=np.int64)
     total = np.zeros(len(measure), dtype=np.int64)
 
@@ -88,11 +116,12 @@ def score(m, prompts, device, answer_ids, W, B, measure, hooks, steer_positions)
         last = out["logits"][-1]
         chose_yes[n] = last[yes_id] > last[no_id]
         gap[n] = float(last[yes_id] - last[no_id])
+        mass[n] = answer_mass(last, answer_ids)
         for i, k in enumerate(measure):
             z = out["hidden_states"][i].astype(np.float64) @ W[k] + B[k]
             past[i] += int((z > 0).sum())
             total[i] += z.size
-    return chose_yes, gap, dict(zip(measure, past / total))
+    return chose_yes, gap, mass, dict(zip(measure, past / total))
 
 
 def report_baseline(chose_yes, target_yes):
@@ -117,6 +146,9 @@ def report_baseline(chose_yes, target_yes):
     return acc, yes_rate
 
 
+METRICS = ("acc", "acc_tgt_yes", "acc_tgt_no", "yes_rate", "answer_mass", "margin", "crossed")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=config.MODEL_NAME)
@@ -133,28 +165,39 @@ def main():
              "Every cell pays this, so it is the cheapest knob in the sweep.",
     )
     p.add_argument(
-        "--coeffs", type=float, nargs="*", default=None,
-        help="steering coefficients; default config.COEFFS. Must span the median "
-             "alpha* that analyze.py prints, or the boundary marker lands off-grid.",
+        "--scales", type=float, nargs="*", default=None,
+        help="steering scales |c v| / |h| (default config.STEER_SCALES). The raw "
+             "coefficient at layer k is scale * h_norm[k] / |v_k|.",
+    )
+    p.add_argument(
+        "--no-control", action="store_true",
+        help="skip the random-direction control (halves the steered passes)",
     )
     args = p.parse_args()
 
     vec, meta = capture.load(args.vectors)
-    V, W, B = vec["V"], vec["W"], vec["B"]
-    # W, B and V were all fitted at the last token of the capture's prompt, and
-    # this sweep steers at the last token of the prompt built below. If the two
-    # prompts differ, every one of those is anchored to a different activation
-    # and the sweep would still produce a perfectly plausible-looking plot.
-    # Checked before the model loads: at 8B that is minutes of weights to read
-    # before an assertion that needs nothing but the sidecar json.
+    if "h_norm" not in vec:
+        raise SystemExit(f"{args.vectors} has no h_norm; re-run analyze first.")
+    V, W, B, h_norm = vec["V"], vec["W"], vec["B"], vec["h_norm"]
+    # W, B and V were all fitted on the capture's prompts, and this sweep steers
+    # the prompt built below. If the two prompts differ, each of them is anchored
+    # to a different activation, and the sweep would still produce a
+    # plausible-looking plot. This is checked before the model loads: at 8B
+    # loading takes minutes, and the check only needs the sidecar json.
     assert meta.get("prompt_style") == PROMPT_STYLE, (
         f"capture used prompt_style {meta.get('prompt_style')!r}, this build expects "
         f"{PROMPT_STYLE!r}. Re-run run_capture (FORCE_CAPTURE=1 in the slurm job) "
         f"and analyze before sweeping."
     )
-    coeffs = np.asarray(args.coeffs if args.coeffs else config.COEFFS, dtype=np.float64)
+    scales = np.asarray(args.scales if args.scales else config.STEER_SCALES, dtype=np.float64)
     layers = list(args.layers)
+    kinds = ["trait"] if args.no_control or not config.RANDOM_CONTROL else ["trait", "random"]
     n_eval = min(args.n_eval, meta["n_eval"])
+    # The raw coefficient per (layer, scale). Both kinds share it: the random
+    # direction has |v_k| by construction.
+    coeffs = np.array(
+        [scales * h_norm[k] / np.linalg.norm(V[k]) for k in layers], dtype=np.float64
+    )
 
     m, tokenizer, device = model_mod.load(
         args.model, args.device, dtype=getattr(torch, args.dtype)
@@ -167,66 +210,80 @@ def main():
     target_yes = np.array(
         [r["answer_not_matching_behavior"].strip() == "Yes" for r in rows], dtype=bool
     )
-    n_steered = len(layers) * int((coeffs != 0).sum()) * len(prompts)
-    print(f"{len(layers)} layers x {len(coeffs)} coeffs x {len(prompts)} prompts "
-          f"= {n_steered + len(prompts)} forward passes "
-          f"(was {len(layers) * len(coeffs) * len(prompts)} with c=0 re-run per layer)")
+    n_steered = len(kinds) * len(layers) * int((scales != 0).sum()) * len(prompts)
+    print(f"{len(kinds)} kinds ({', '.join(kinds)}) x {len(layers)} layers x "
+          f"{len(scales)} scales x {len(prompts)} prompts = "
+          f"{n_steered + len(prompts)} forward passes (c=0 shared)")
 
-    acc = np.zeros((len(layers), len(coeffs)))
-    crossed = np.zeros((len(layers), len(coeffs)))
-    # Insurance against the metric, not a second result. acc is a hard argmax
-    # between two fixed tokens and throws the magnitude away, so a real but
-    # sub-threshold push reads as a flat curve. The signed margin toward the
-    # target choice is the same measurement without the thresholding, and
-    # recording it here costs one subtraction per prompt -- far cheaper than
-    # discovering afterwards that the whole sweep has to be run again.
-    margin = np.zeros((len(layers), len(coeffs)))
+    res = {name: np.zeros((len(kinds), len(layers), len(scales))) for name in METRICS}
 
     def cell(hooks, measure):
-        chose_yes, gap, cr = score(
+        chose_yes, gap, mass, cr = score(
             m, prompts, device, (yes_id, no_id), W, B, measure, hooks, args.steer_positions
         )
+        hit = chose_yes == target_yes
+        # The margin is kept as a check on the metric, not as a second result.
+        # acc is a hard argmax between two tokens and throws the magnitude away,
+        # so a real push that stays below the flip threshold reads as a flat
+        # curve. The signed margin toward the target is the same measurement
+        # without the threshold.
         signed = np.where(target_yes, gap, -gap)
-        return chose_yes, float((chose_yes == target_yes).mean()), float(signed.mean()), cr
+        return chose_yes, {
+            "acc": float(hit.mean()),
+            "acc_tgt_yes": float(hit[target_yes].mean()),
+            "acc_tgt_no": float(hit[~target_yes].mean()),
+            "yes_rate": float(chose_yes.mean()),
+            "answer_mass": float(np.median(mass)),
+            "margin": float(signed.mean()),
+        }, cr
+
+    def put(kind_i, layer_i, scale_j, metrics, crossed):
+        for name, value in metrics.items():
+            res[name][kind_i, layer_i, scale_j] = value
+        res["crossed"][kind_i, layer_i, scale_j] = crossed
 
     # c = 0 registers no hook, so its forward pass is identical for every layer
-    # in the sweep and running it once per layer was pure duplication. One pass
-    # per prompt fills the whole column, measuring every layer's z as it goes.
+    # and both kinds. One pass per prompt fills that whole column, measuring
+    # every layer's z as it goes.
     base_acc = base_yes = None
-    zero = np.flatnonzero(coeffs == 0)
+    zero = np.flatnonzero(scales == 0)
     if zero.size:
         j = int(zero[0])
-        chose_yes, a, mg, cr = cell([], layers)
+        chose_yes, metrics, cr = cell([], layers)
         base_acc, base_yes = report_baseline(chose_yes, target_yes)
-        acc[:, j], margin[:, j] = a, mg
-        crossed[:, j] = [cr[k] for k in layers]
+        for t in range(len(kinds)):
+            for i, k in enumerate(layers):
+                put(t, i, j, metrics, cr[k])
 
-    # The vector must carry the model's own dtype: adding a float32 v to a
-    # bfloat16 activation promotes the residual stream to float32 and the next
-    # block's matmul then fails against bfloat16 weights.
+    # The vector must have the model's own dtype. Adding a float32 v to a
+    # bfloat16 activation promotes the residual stream to float32, and the next
+    # block's matmul then fails against the bfloat16 weights.
     dtype = next(m.parameters()).dtype
     for i, k in enumerate(layers):
-        v = torch.tensor(V[k], dtype=dtype, device=device)
-        for j, c in enumerate(coeffs):
-            if c == 0:
-                continue
-            hooks = [(hook_name(k), add_vector(c * v, args.steer_positions))]
-            _, acc[i, j], margin[i, j], cr = cell(hooks, [k])
-            crossed[i, j] = cr[k]
-        print(f"layer {k} acc:     " + " ".join(f"{a:.2f}" for a in acc[i]))
-        print(f"layer {k} crossed: " + " ".join(f"{a:.2f}" for a in crossed[i]))
-        print(f"layer {k} margin:  " + " ".join(f"{a:+.2f}" for a in margin[i]))
+        directions = {"trait": V[k], "random": random_direction(k, V[k], config.SEED)}
+        for t, kind in enumerate(kinds):
+            v = torch.tensor(directions[kind], dtype=dtype, device=device)
+            for j, c in enumerate(coeffs[i]):
+                if scales[j] == 0:
+                    continue
+                hooks = [(hook_name(k), add_vector(float(c) * v, args.steer_positions))]
+                _, metrics, cr = cell(hooks, [k])
+                put(t, i, j, metrics, cr[k])
+            print(f"layer {k} {kind:6s} acc|tgt=Yes  " + " ".join(f"{a:5.2f}" for a in res["acc_tgt_yes"][t, i]))
+            print(f"layer {k} {kind:6s} acc|tgt=No   " + " ".join(f"{a:5.2f}" for a in res["acc_tgt_no"][t, i]))
+            print(f"layer {k} {kind:6s} yes-rate     " + " ".join(f"{a:5.2f}" for a in res["yes_rate"][t, i]))
+            print(f"layer {k} {kind:6s} P(Yes)+P(No) " + " ".join(f"{a:5.2f}" for a in res["answer_mass"][t, i]))
+        print(f"layer {k} scales              " + " ".join(f"{a:+.2f}" for a in scales))
 
     capture.save(
         args.out,
-        {
-            "layers": np.array(layers), "coeffs": coeffs,
-            "acc": acc, "crossed": crossed, "margin": margin,
-        },
+        {"layers": np.array(layers), "scales": scales, "coeffs": coeffs, **res},
         {
             **meta, "steer_positions": args.steer_positions,
             "n_prompts": len(prompts), "steer_device": device,
             "steer_dtype": args.dtype,
+            "kinds": kinds, "random_seed": config.SEED,
+            "min_answer_mass": config.MIN_ANSWER_MASS,
             # The two numbers that say whether the sweep had anything to move.
             "baseline_acc": base_acc, "baseline_yes_rate": base_yes,
         },
