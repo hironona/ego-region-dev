@@ -7,21 +7,23 @@ exact crossing coefficient alpha* = -z(h) / (w.v). We plot the steering effect
 against alpha and mark alpha* on it.
 
 N_TURNS / SEED / POOL match speaker_probe's, so the speaker boundary fitted
-here is built the same way as the one measured there. MODEL_NAME deliberately
-does not: speaker_probe ran on Qwen3-0.6B, and at that size the unsteered model
-answers the agreeableness eval at chance (it picks one of Yes/No largely
-regardless of the question), so a steering sweep on top of it has no behaviour
-to move. run_steer prints the unsteered Yes-rate for exactly this reason. The
-probe here is therefore refitted on 8B activations from this experiment's own
-capture -- its accuracy is a number about 8B, not comparable with the 0.98
-speaker_probe reports for 0.6B.
+here is built the same way as the one measured there. MODEL_NAME now matches
+too (both default to Llama-3.1-8B-Instruct). On Qwen it deliberately did not:
+speaker_probe ran on Qwen3-0.6B, and at that size the unsteered model answers
+the agreeableness eval at chance (it picks one of Yes/No largely regardless of
+the question), so a steering sweep on top of it has no behaviour to move; this
+experiment ran on Qwen3-8B instead. run_steer prints the unsteered Yes-rate for
+exactly this reason. The probe is refitted on this experiment's own capture
+(40 conversations, 2 tokens per turn), so its accuracy is still not the same
+number as speaker_probe's.
 """
 
 from pathlib import Path
 
 import numpy as np
 
-MODEL_NAME = "Qwen/Qwen3-8B"  # 36 blocks, d_model 4096
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"  # 32 blocks, 32 heads, d_model 4096
+# Earlier results (the numbers quoted below) are from "Qwen/Qwen3-8B" (36 blocks).
 DEVICE = "auto"  # "mps" | "cpu" | "cuda" | "auto"
 # float32 is the reference numerics and what every earlier capture used, but 8B
 # weights in fp32 are 32 GB before a single activation. "bfloat16" halves that
@@ -75,12 +77,12 @@ VECTOR_OFFSET = N_EVAL
 #   quantity, since there are many activations to count).
 # "last": add it only at the position the answer is read from, so the single
 #   crossing coefficient alpha* stays exact and can be marked as a vertical line.
-#   Not a working alternative on 8B: with the system-prompt vector at layer 18 it
+#   Not a working alternative on Qwen3-8B: with the system-prompt vector at layer 18 it
 #   changed no answer at all up to 1.75x the activation norm (presumably the
 #   later layers read the answer off the unsteered prompt tokens via attention).
 STEER_POSITIONS = "all"
 
-# Three layers, not six, and none near either end of the 36 blocks. The sweep
+# Three layers, not six, and none near either end of the 32 blocks. The sweep
 # costs layers x coeffs x N_EVAL forward passes and the model is now 13x bigger,
 # so this is where the budget actually goes. Nothing here needs a dense scan of
 # depth: the early layers have no persona to move (a trait direction read off
@@ -97,16 +99,16 @@ STEER_LAYERS = (12, 18, 24)
 # c = r * |h_k| / |v_k|, where |h_k| is the median norm at the read position of
 # the unsteered eval prompts (vectors.npz "h_norm"). A raw coefficient means
 # something different at every layer and for every vector -- |v|/|h| was ~0.15
-# on 0.6B but 0.17 / 0.29 / 0.36 at layers 12 / 18 / 24 on 8B, so the old +-12
+# on Qwen3-0.6B but 0.17 / 0.29 / 0.36 at layers 12 / 18 / 24 on Qwen3-8B, so the old +-12
 # grid pushed 2-4x the whole activation and most of it measured a broken model.
-# On 8B the answer format survives up to r ~ 1 and is gone by r ~ 1.7; 1.5 is
+# On Qwen3-8B the answer format survives up to r ~ 1 and is gone by r ~ 1.7; 1.5 is
 # kept at the edge so the plot shows where that happens.
 _HALF = np.array([0.1, 0.25, 0.5, 0.75, 1.0, 1.5])
 STEER_SCALES = np.concatenate([-_HALF[::-1], [0.0], _HALF])
 
 # Every trait cell is paired with the same coefficient along a random direction
 # of the same norm (seeded by SEED). Steering along *any* large direction pushed
-# 8B towards a question-independent "Yes", so an effect only counts as the
+# Qwen3-8B towards a question-independent "Yes", so an effect only counts as the
 # trait's if it beats this control. Doubles the steered passes.
 RANDOM_CONTROL = True
 

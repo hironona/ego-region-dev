@@ -24,7 +24,7 @@ import argparse
 import numpy as np
 import torch
 
-from core import capture, model as model_mod
+from core import capture, chat, model as model_mod
 
 from . import config
 from .opinions import build
@@ -35,43 +35,28 @@ hook_name = capture.resid_hook_name
 # count, since "user" and "User" are the same answer. Role names, not "You"/"Me":
 # see opinions.QUESTION.
 ANSWER_WORDS = (("User", "user"), ("Assistant", "assistant"))
-GEN_PROMPT = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
 def build_prompt(tokenizer, item):
     """Templated history + question, ending where the answer begins.
 
     Returns (ids (1, T) tensor, role (T,) int8) with role 0/1 for every token of
-    a user/assistant history block (header, content, <|im_end|>, newline) and
-    -1 for the question and the generation prompt, which no mode touches.
+    a user/assistant history block (header, content, end-of-message token) and
+    -1 for everything no mode touches: the format's preamble (BOS and Llama
+    3.1's default system block), the question and the generation prompt.
 
-    Two Qwen3 template facts are pinned here (see CLAUDE.md). History: the
+    core.chat.encode pins the template facts (see CLAUDE.md). On Qwen3 the
     `<think>` block is only injected into assistant messages *after* the last
-    user query, and the question is that query, so the history comes out clean.
-    Generation prompt: `enable_thinking=False` is what appends the pre-closed
-    `<think>\\n\\n</think>\\n\\n`; without it the model starts reasoning and the
-    answer logits are read from the tail of the distribution.
+    user query, and the question is that query, so the history comes out
+    clean; the generation prompt carries the pre-closed think block that puts
+    the answer at the read position.
     """
     msgs = item["messages"] + [{"role": "user", "content": item["question"]}]
-    text = tokenizer.apply_chat_template(
-        msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False
-    )
-    blocks = [f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in msgs]
-    assert text == "".join(blocks) + GEN_PROMPT, repr(text[-200:])
-    assert text.count("<think>") == 1, "history picked up a <think> block"
-
-    ids, role = [], []
-    for msg, block in zip(msgs[:-1], blocks[:-1]):
-        block_ids = tokenizer(block, add_special_tokens=False)["input_ids"]
-        ids += block_ids
-        role += [0 if msg["role"] == "user" else 1] * len(block_ids)
-    tail = tokenizer(blocks[-1] + GEN_PROMPT, add_special_tokens=False)["input_ids"]
-    ids += tail
-    role += [-1] * len(tail)
-    # Per-block tokenisation is only valid if it matches the full text's: every
-    # block starts with <|im_start|>, so merges cannot cross a block boundary.
-    assert ids == tokenizer(text, add_special_tokens=False)["input_ids"]
-    return torch.tensor([ids]), np.array(role, dtype=np.int8)
+    _, ids, spans = chat.encode(tokenizer, msgs, add_generation_prompt=True)
+    role = np.full(ids.shape[1], -1, dtype=np.int8)
+    for msg, s in zip(msgs[:-1], spans[:-1]):
+        role[s.block_start:s.block_end] = 0 if msg["role"] == "user" else 1
+    return ids, role
 
 
 def mode_positions(role, mode):

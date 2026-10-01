@@ -1,8 +1,12 @@
 # ego_region
 
 Where does a chat model represent *who is speaking*, and is that representation load-bearing?
-Four experiments on `Qwen/Qwen3-0.6B`: probe for the user/assistant direction, localise it by
-ablation, then test whether a trait steering vector interacts with the boundary it defines.
+Five experiments, all defaulting to `meta-llama/Llama-3.1-8B-Instruct`: probe for the
+user/assistant direction, localise it by ablation, test whether a trait steering vector
+interacts with the boundary it defines, then mirror the history across that boundary. The
+headline numbers below were measured on Qwen3 (0.6B for the first three, 8B for the last
+two); `--model Qwen/Qwen3-0.6B` etc. still works, since the chat format is picked from the
+tokenizer (`core/chat.py`).
 
 ## Setup
 
@@ -13,7 +17,8 @@ uv sync
 Device is auto-detected; `--device cpu|cuda|mps` overrides. Use `cpu` or `cuda` for real
 runs — TransformerLens reports MPS can be silently wrong.
 
-The first capture downloads model weights into the HF cache. `steering_boundary` also
+The first capture downloads model weights into the HF cache. Llama is gated: accept
+Meta's licence on the model page and `hf auth login` first. `steering_boundary` also
 fetches `agreeableness.jsonl` from `anthropics/evals` into its `outputs/data/`; both need
 network once (see [Cluster runs](#cluster-runs) if the compute node has none).
 
@@ -47,7 +52,7 @@ uv run python -m experiments.speaker_probe.analyze
 ```
 
 Capture: 100 synthetic conversations × 10 turns, 6 evenly spaced content tokens per message
-→ one `outputs/capture.npz` (~1.3 GB) with the residual stream at every layer and
+→ one `outputs/capture.npz` (~1.3 GB on Qwen3-0.6B, ~4.5x that on Llama-3.1-8B) with the residual stream at every layer and
 speaker/turn/conversation labels. Knobs: `--n`, `--turns`, `--tokens-per-turn`,
 `--pool {shared,role}`, `--out`.
 
@@ -65,10 +70,10 @@ uv run python -m experiments.mean_ablation_probe.run_capture --device cpu
 uv run python -m experiments.mean_ablation_probe.analyze
 ```
 
-13 conditions — baseline, then a sliding window of 5 consecutive `attn_out` or `mlp_out`
-blocks frozen at its context mean — each a separate file in `outputs/captures/`
-(`baseline.npz`, `attn_00-04.npz`, …, `mlp_25-27.npz`). Per `config.py` that is ~240 MB
-per condition, so budget ~3 GB. Knobs: `--window`, `--components attn mlp`, `--n`,
+15 conditions on Llama-3.1-8B (13 on Qwen3-0.6B) — baseline, then a sliding window of 5
+consecutive `attn_out` or `mlp_out` blocks frozen at its context mean — each a separate file
+in `outputs/captures/` (`baseline.npz`, `attn_00-04.npz`, …, `mlp_30-31.npz`). Per
+`config.py` that is ~1.1 GB per condition at 8B, so budget ~16 GB (~3 GB on 0.6B). Knobs: `--window`, `--components attn mlp`, `--n`,
 `--tokens-per-turn`, `--out-dir`.
 
 Analyze reads the whole directory (`--capture-dir`) and writes `accuracy_by_layer.png`,
@@ -85,10 +90,11 @@ uv run python -m experiments.head_ablation_sweep.run_capture --device cpu
 uv run python -m experiments.head_ablation_sweep.analyze
 ```
 
-87 conditions: baseline, each of 5×16 individual heads in layers 0–4 mean-ablated at
-`hook_z`, each whole layer, and the whole window as the positive control. The config trims
-the cost of that many cells to ~10 MB and ~50 s each by using 40 conversations and only
-three readout layers (5, 14, 28) — raise `--n` or `--probe-layers` if a result looks
+167 conditions on Llama-3.1-8B: baseline, each of 5×32 individual heads in layers 0–4
+mean-ablated at `hook_z`, each whole layer, and the whole window as the positive control.
+Layers 0–4 is the window `mean_ablation_probe` found on Qwen3-0.6B; re-check it on Llama
+before trusting this sweep. The config trims the cost by using 40 conversations and only
+three readout layers (5, 16, 32) — raise `--n` or `--probe-layers` if a result looks
 marginal. Knobs: `--sweep-layers`, `--probe-layers`, `--n`, `--tokens-per-turn`,
 `--out-dir`.
 
@@ -97,7 +103,7 @@ Analyze writes `head_delta_heatmap.png`, `ranked_heads.png`, `additivity.png`,
 
 ### steering_boundary
 
-Four steps on `Qwen3-8B`, two of which load the model. `analyze` is run twice by design:
+Four steps, two of which load the model. `analyze` is run twice by design:
 the first pass fits the probe and writes the vectors the sweep needs, the second finds the
 sweep and plots it.
 
@@ -113,7 +119,7 @@ uv run python -m experiments.steering_boundary.analyze
    The contrast is `config.VECTOR_METHOD`: `caa` (default) reads each held-out question
    followed by the trait answer vs the other answer, at the answer token, with Yes and No
    balanced across the two classes; `system_prompt` is the old trait-vs-neutral system
-   prompt contrast, whose vector steered no better than a random direction on 8B. Knobs:
+   prompt contrast, whose vector steered no better than a random direction on Qwen3-8B. Knobs:
    `--vector-method`, `--trait`, `--eval-set`, `--n-eval`,
    `--n-vector`, `--n`, `--dtype bfloat16` (fp32 weights alone are 32 GB; bf16 halves that
    and is the only way this fits a 32 GB node).
@@ -133,8 +139,8 @@ uv run python -m experiments.steering_boundary.analyze
    control, with cells that no longer answer greyed out), `steering_validity.png` (Yes-rate
    and answer mass per cell: check this first), `boundary_geometry.png`, `results.json`.
 
-The probe here is refitted on 8B activations, so its accuracy is not comparable with the
-0.98 `speaker_probe` reports for 0.6B.
+The probe here is refitted on this experiment's own capture (40 conversations, 2 tokens per
+turn). On Qwen it was also a different model from `speaker_probe`'s (8B vs 0.6B).
 
 #### Cluster runs
 
@@ -149,7 +155,7 @@ change), `DTYPE=bfloat16`, `STEER_ARGS="--layers 18 --n-eval 30"`.
 
 ### mirror_attribution
 
-Four steps on `Qwen3-8B`, the same shape as `steering_boundary`. `analyze` runs before and
+Four steps, the same shape as `steering_boundary`. `analyze` runs before and
 after the mirror sweep.
 
 ```bash
@@ -171,11 +177,12 @@ uv run python -m experiments.mirror_attribution.analyze
    on one topic per turn, in the same first-person sentence. A final user message then
    quotes one statement: *"Who said that, the user or the assistant? Answer with one word: User or Assistant."*
    The answer is a forced choice read at the first answer position: log P(User) against
-   log P(Assistant), either case, with `enable_thinking=False`. (A "you or me?" wording made
-   8B answer the opposite role on 88% of items, so the question names the roles.) Every item is run once without the hook, then
+   log P(Assistant), either case, at the end of the generation prompt (on Qwen3, with
+   `enable_thinking=False`). (A "you or me?" wording made Qwen3-8B answer the opposite role
+   on 88% of items, so the question names the roles.) Every item is run once without the hook, then
    once per cell of layer k × mode × kind:
    - modes: `history` (every history token), `assistant` or `user` (that role's blocks only).
-     Position 0 and the question are never touched.
+     Position 0, Llama's system preamble and the question are never touched.
    - kinds: `self` is the Householder reflection `x' = x − 2(v·x+b)/|v|²·v`; `random` pushes
      each token by the same distance along a random direction.
 
@@ -208,9 +215,10 @@ sidecar `.meta.json` records the templated text, token strings and label positio
 uv run python test_pipeline.py
 ```
 
-15 checks covering npz round-trip, capture shapes, the two Qwen3 `<think>` template
-quirks, the lexical-confound control, and that each intervention touches exactly the
-tokens it claims to (including the attribution prompt's role mask and the reflection hook). Several load the model on CPU, so it is not instant.
+16 checks covering npz round-trip, capture shapes, the Llama 3.1 system-preamble and the
+two Qwen3 `<think>` template quirks (tokenizer checks run on both families), the lexical-confound control, and that each intervention touches exactly the
+tokens it claims to (including the attribution prompt's role mask and the reflection hook). Several load the default model on CPU (once; ~32 GB of RAM for 8B in fp32), so run it
+on a machine that has that.
 
 ## More
 

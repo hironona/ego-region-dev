@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-# 96G, not 32G: Qwen3-8B in float32 is 32 GB of weights, and loading transiently
+# 96G, not 32G: an 8B model in float32 is 32 GB of weights, and loading transiently
 # holds the HF state dict alongside the HookedTransformer copy. --dtype bfloat16
 # halves both and fits in 48G, at the cost of no longer matching the float32
 # numerics every earlier capture used -- so it is a flag, not the default.

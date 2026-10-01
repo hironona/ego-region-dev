@@ -135,7 +135,7 @@ def plot_pca_boundaries(X, speaker, train_mask, test_mask, out_dir, seed=0, max_
     fitted in that 2D space, points coloured by speaker.
 
     The boundary is a probe refitted on the two principal components, not the
-    full-D probe from Exp 1 — a hyperplane in 1024-D has no faithful 2D image.
+    full-D probe from Exp 1 — a hyperplane in d_model dimensions has no faithful 2D image.
     Each panel therefore reports its own 2D balanced accuracy so the gap against
     the full-D number is visible rather than implied.
     """
@@ -245,7 +245,7 @@ def plot_probe_plane_boundaries(X, speaker, train_mask, test_mask, out_dir, seed
 def plot_pca_vs_full(acc_full, acc_2d, out_dir):
     fig, ax = plt.subplots(figsize=(7, 4.5))
     layers = np.arange(len(acc_full))
-    ax.plot(layers, acc_full, "-o", ms=3, label="full 1024-D probe")
+    ax.plot(layers, acc_full, "-o", ms=3, label="full-D probe")
     ax.plot(layers, acc_2d, "-s", ms=3, label="probe on 2 PCs")
     ax.axhline(0.5, color="k", lw=0.8, ls="--", label="chance")
     ax.set(xlabel="layer", ylabel="balanced accuracy", title="How much survives the 2D projection")

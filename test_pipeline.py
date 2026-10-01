@@ -3,16 +3,33 @@
     uv run python test_pipeline.py
 """
 
+from functools import lru_cache
+
 import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from core import capture
+from core import capture, chat
 from experiments.speaker_probe import config
 from experiments.speaker_probe.run_capture import build_input
 
 # Each experiment owns its config; these checks are model-level, so they read
-# speaker_probe's copy as the representative one.
+# speaker_probe's copy as the representative one. Tokenizer-only checks also run
+# on QWEN, the earlier default, so the Qwen3 path cannot rot unnoticed.
+QWEN = "Qwen/Qwen3-0.6B"
+TOKENIZERS = (config.MODEL_NAME, QWEN)
+
+
+@lru_cache(maxsize=None)
+def _model():
+    """The default model on CPU, loaded once: at 8B every load is 32 GB and minutes."""
+    from core import model as model_mod
+
+    return model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+
+
+def _ids(tok, content):
+    return build_input(tok, [{"role": "user", "content": content}])[1]
 
 
 def test_save_load_roundtrip(tmp="/tmp/ego_region_test/cap.npz"):
@@ -31,7 +48,7 @@ def test_qwen3_injects_think_into_history():
     it there. If a future template stops doing this, this test fails and the
     truncation trick in build_input can be deleted.
     """
-    tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    tok = AutoTokenizer.from_pretrained(QWEN)
     msgs = [
         {"role": "user", "content": "U1"},
         {"role": "assistant", "content": "A1"},
@@ -43,21 +60,40 @@ def test_qwen3_injects_think_into_history():
     assert naive.count("<think>") == 1 and "<think>\n\n</think>\n\nA2" in naive, naive
 
 
-def test_speaker_probe_input_is_think_free_and_aligned():
+def test_llama3_template_adds_a_system_preamble():
+    """The Llama 3.1 behaviour core.chat.LLAMA3.preamble encodes: assert it still exists.
+
+    With no system message the template still writes BOS and a system block
+    with a fixed cutoff/date header, so position 0 is BOS and the first message
+    starts ~25 tokens in. A caller's system prompt is merged into that block
+    rather than getting one of its own, which is why chat.encode rejects system
+    messages and steering's system-prompt contrast goes through chat.prompt.
+    """
     tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    assert chat.for_tokenizer(tok) is chat.LLAMA3, "default model is not Llama 3"
+    naive = tok.apply_chat_template([{"role": "user", "content": "U1"}], tokenize=False)
+    assert naive == chat.LLAMA3.preamble + chat.LLAMA3.block("user", "U1"), naive
+    with_sys, _ = chat.prompt(tok, [{"role": "system", "content": "SYS"},
+                                    {"role": "user", "content": "U1"}])
+    assert with_sys.count("system<|end_header_id|>") == 1, with_sys
+    assert chat.LLAMA3.preamble.replace("<|eot_id|>", "SYS<|eot_id|>") in with_sys, with_sys
+
+
+def test_history_input_is_think_free_and_aligned():
     msgs = [
         {"role": "user", "content": "U1"},
         {"role": "assistant", "content": "A1"},
         {"role": "user", "content": "U2"},
         {"role": "assistant", "content": "A2"},
     ]
-    text, ids, spans = build_input(tok, msgs)
-    think_ids = {tok.convert_tokens_to_ids(t) for t in ("<think>", "</think>")}
-    assert "<think>" not in text and not think_ids & set(ids[0].tolist())
-    # spans must decode back to exactly the message content, role headers excluded
-    assert len(spans) == len(msgs)
-    for (start, end), msg in zip(spans, msgs):
-        assert tok.decode(ids[0, start:end]) == msg["content"]
+    for name in TOKENIZERS:
+        tok = AutoTokenizer.from_pretrained(name)
+        text, ids, spans = build_input(tok, msgs)
+        assert "<think>" not in text and "think>" not in tok.decode(ids[0]), name
+        # spans must decode back to exactly the message content, role headers excluded
+        assert len(spans) == len(msgs)
+        for (start, end), msg in zip(spans, msgs):
+            assert tok.decode(ids[0, start:end]) == msg["content"], (name, msg)
 
 
 def test_shared_pool_decorrelates_content_from_role():
@@ -111,18 +147,13 @@ def test_mean_ablation_freezes_the_window_and_nothing_before_it():
     """
     import torch as _torch
 
-    from core import model as model_mod
     from experiments.mean_ablation_probe.run_capture import (
         conditions,
         mean_over_context,
     )
 
-    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
-    ids = tok(
-        "<|im_start|>user\nhello there friend<|im_end|>\n",
-        add_special_tokens=False,
-        return_tensors="pt",
-    )["input_ids"]
+    m, tok, device = _model()
+    ids = _ids(tok, "hello there friend")
 
     start, end = 3, 6
     hooks = [(f"blocks.{i}.hook_mlp_out", mean_over_context) for i in range(start, end)]
@@ -161,16 +192,11 @@ def test_head_ablation_matches_layer_ablation():
     comparing a head-sweep number against a window-sweep number; if it ever
     fails, the two experiments are measuring different interventions.
     """
-    from core import model as model_mod
     from experiments.head_ablation_sweep.run_capture import Z_HOOK, conditions, mean_ablate_heads
     from experiments.mean_ablation_probe.run_capture import mean_over_context
 
-    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
-    ids = tok(
-        "<|im_start|>user\nhello there friend how are you<|im_end|>\n",
-        add_special_tokens=False,
-        return_tensors="pt",
-    )["input_ids"]
+    m, tok, device = _model()
+    ids = _ids(tok, "hello there friend how are you")
 
     layer = 2
     by_head = capture.run(
@@ -211,14 +237,14 @@ def test_read_position_is_where_the_answer_goes():
 
     So assert the distribution, not the string. The string is what misled the
     first version of prompt_ids: it asserted `"<think>" not in text`, which was
-    true and exactly backwards.
+    true and exactly backwards. Llama 3.1 has no thinking mode, so there only the
+    first half applies -- but it is the half that says the eval measures anything.
     """
-    from core import model as model_mod
     from experiments.steering_boundary.run_capture import (
         ANSWER_INSTRUCTION, answer_token_ids, prompt_ids,
     )
 
-    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    m, tok, device = _model()
     yes_id, no_id = answer_token_ids(tok)
     q = 'Is the following statement something you would say?\n"I like helping people"'
 
@@ -233,6 +259,8 @@ def test_read_position_is_where_the_answer_goes():
     p /= p.sum()
     assert p[yes_id] + p[no_id] > 0.9, p[yes_id] + p[no_id]
 
+    if chat.for_tokenizer(tok) is not chat.QWEN3:
+        return
     # and the default template must still be the thinking one, or the flag above
     # is now a no-op that nothing else would notice
     plain = tok.apply_chat_template(
@@ -321,12 +349,10 @@ def test_steer_positions_touch_exactly_the_intended_tokens():
     plausible steering curve, but the crossing fraction would be counted over
     activations that were never pushed.
     """
-    from core import model as model_mod
     from experiments.steering_boundary.run_steer import add_vector, hook_name
 
-    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
-    ids = tok("<|im_start|>user\nhello there friend<|im_end|>\n",
-              add_special_tokens=False, return_tensors="pt")["input_ids"]
+    m, tok, device = _model()
+    ids = _ids(tok, "hello there friend")
 
     k = 5
     v = torch.zeros(m.cfg.d_model)
@@ -392,9 +418,8 @@ def test_layer_and_position_subsets_are_exactly_the_full_capture():
     dimension -- the sweep would keep running and quietly probe the wrong
     activation, which no downstream plot could reveal.
     """
-    from core import model as model_mod
 
-    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    m, tok, device = _model()
     _, ids, _ = build_input(tok, [{"role": "user", "content": "Hi there"}])
     t = ids.shape[1]
 
@@ -424,9 +449,8 @@ def test_layer_and_position_subsets_are_exactly_the_full_capture():
 
 def test_capture_shapes():
     """Hooked value vectors must line up with the layers and tokens they came from."""
-    from core import model as model_mod
 
-    m, tok, device = model_mod.load(config.MODEL_NAME, "cpu", dtype=torch.float32)
+    m, tok, device = _model()
     _, ids, _ = build_input(tok, [{"role": "user", "content": "Hi"}])
     a = capture.run(m, ids, device)
     n_layers, t = m.cfg.n_layers, ids.shape[1]
@@ -441,22 +465,20 @@ def test_capture_shapes():
 def test_attribution_prompt_roles_are_exact():
     """The mirror is only as targeted as the role mask it is given.
 
-    Every history token must carry its block's role, the question and generation
-    prompt must carry none, the read position must sit after the pre-closed think
-    block, and no mode may touch position 0 or the question. Each quoted
+    Every history token must carry its block's role; the preamble, question and
+    generation prompt must carry none; the read position must sit at the end of
+    the format's generation prompt (after the pre-closed think block on Qwen3);
+    and no mode may touch position 0, the preamble or the question. Each quoted
     statement must also occur exactly once in its history, or the item has no
     single correct answer.
     """
     from experiments.mirror_attribution.opinions import build
     from experiments.mirror_attribution.run_mirror import (
-        GEN_PROMPT,
         answer_token_ids,
         build_prompt,
         mode_positions,
     )
 
-    tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
-    answer_token_ids(tok)  # each answer word is one distinct token
     items = build(40, 4, seed=0)
     assert sum(it["label"] for it in items) == 20
     for it in items:
@@ -464,23 +486,31 @@ def test_attribution_prompt_roles_are_exact():
         assert history.count(it["statement"]) == 1, it
         assert it["statement"] in it["question"]
 
-        ids, role = build_prompt(tok, it)
-        ids = ids[0].tolist()
-        assert len(ids) == len(role)
-        assert tok.decode(ids).endswith(GEN_PROMPT)
-        for r, who in ((0, "user"), (1, "assistant")):
-            text = tok.decode([i for i, x in zip(ids, role) if x == r])
-            assert text.count(f"<|im_start|>{who}\n") == 4, (who, text)
-            for m in it["messages"]:
-                assert (m["content"] in text) == (m["role"] == who)
-        q_start = int(np.flatnonzero(role == -1)[0])
-        assert (role[q_start:] == -1).all() and (role[:q_start] >= 0).all()
-        assert it["question"] in tok.decode(ids[q_start:])
+    for name in TOKENIZERS:
+        tok = AutoTokenizer.from_pretrained(name)
+        fmt = chat.for_tokenizer(tok)
+        answer_token_ids(tok)  # each answer word is one distinct token
+        for it in items:
+            ids, role = build_prompt(tok, it)
+            ids = ids[0].tolist()
+            assert len(ids) == len(role)
+            assert tok.decode(ids).endswith(fmt.gen_prompt), name
+            for r, who in ((0, "user"), (1, "assistant")):
+                text = tok.decode([i for i, x in zip(ids, role) if x == r])
+                assert text.count(fmt.header.format(role=who)) == 4, (name, who, text)
+                for m in it["messages"]:
+                    assert (m["content"] in text) == (m["role"] == who)
+            first = int(np.flatnonzero(role >= 0)[0])
+            assert tok.decode(ids[:first]) == fmt.preamble, name
+            q_start = int(np.flatnonzero(role[first:] == -1)[0]) + first
+            assert (role[q_start:] == -1).all() and (role[first:q_start] >= 0).all()
+            assert it["question"] in tok.decode(ids[q_start:])
 
-        hist = mode_positions(role, "history")
-        assert hist[0] == 1 and hist[-1] == q_start - 1 and len(hist) == q_start - 1
-        u, a = mode_positions(role, "user"), mode_positions(role, "assistant")
-        assert not set(u) & set(a) and sorted(np.r_[u, a]) == list(hist)
+            hist = mode_positions(role, "history")
+            lo = max(first, 1)
+            assert hist[0] == lo and hist[-1] == q_start - 1 and len(hist) == q_start - lo
+            u, a = mode_positions(role, "user"), mode_positions(role, "assistant")
+            assert not set(u) & set(a) and sorted(np.r_[u, a]) == list(hist)
 
 
 def test_mirror_hook_reflects_exactly():

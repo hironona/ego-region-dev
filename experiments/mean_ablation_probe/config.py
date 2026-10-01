@@ -12,7 +12,7 @@ is shared, so a mismatch here silently changes the conversations.
 
 from pathlib import Path
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"  # 32 blocks, 32 heads, d_model 4096
 DEVICE = "auto"  # "mps" | "cpu" | "cuda" | "auto"
 
 N_CONVERSATIONS = 100
@@ -20,8 +20,10 @@ N_TURNS = 10
 SEED = 0
 POOL = "shared"
 
-# 13 conditions x this many rows x 29 layers x 1024 dims of fp16 is the whole disk
-# cost of the experiment: 2 tokens/turn -> ~4k rows -> ~240 MB per condition.
+# Conditions x this many rows x (L+1) layers x d_model dims of fp16 is the whole
+# disk cost of the experiment: 2 tokens/turn -> ~4k rows. On Qwen3-0.6B (13
+# conditions, 29 x 1024) that was ~240 MB per condition; on Llama-3.1-8B (15
+# conditions, 33 x 4096) it is ~1.1 GB per condition, ~16 GB in all.
 # Raise it if a probe ever looks sample-starved; the effect here is not subtle.
 TOKENS_PER_TURN = 2
 

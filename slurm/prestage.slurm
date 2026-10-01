@@ -15,10 +15,13 @@
 #   sbatch slurm/prestage.slurm
 #
 # Fetches two things, neither of which is cached anywhere yet:
-#   Qwen/Qwen3-8B            from huggingface.co  -> $HF_HOME  (~16 GB of
-#                            safetensors; the walltime and the quota on /home
-#                            are both sized for that, not for the 0.6B this
-#                            pipeline used to run on)
+#   config.MODEL_NAME        from huggingface.co  -> $HF_HOME  (~16 GB of
+#                            safetensors for meta-llama/Llama-3.1-8B-Instruct, as
+#                            for Qwen/Qwen3-8B before it; the walltime and the
+#                            quota on /home are both sized for that). Llama is
+#                            gated: HF_TOKEN (or `hf auth login` on the login
+#                            node) must belong to an account that accepted
+#                            Meta's licence, or this fails with a 401/403.
 #   agreeableness.jsonl      from raw.githubusercontent.com
 #                            -> experiments/steering_boundary/outputs/data/
 #

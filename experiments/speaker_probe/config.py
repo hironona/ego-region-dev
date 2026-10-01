@@ -6,7 +6,9 @@ from a shared module, so changing one experiment can never silently move another
 
 from pathlib import Path
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"  # 32 blocks, 32 heads, d_model 4096
+# The Qwen3 path still works (core.chat picks the format from the tokenizer);
+# the earlier results were measured on "Qwen/Qwen3-0.6B".
 DEVICE = "auto"  # "mps" | "cpu" | "cuda" | "auto"
 
 N_CONVERSATIONS = 100

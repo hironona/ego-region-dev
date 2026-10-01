@@ -8,64 +8,26 @@ import argparse
 import numpy as np
 import torch
 
-from core import capture, model as model_mod
+from core import capture, chat, model as model_mod
 
 from . import config
 from .conversations import build
 
 
 def build_input(tokenizer, messages):
-    """Build think-free templated text + input_ids + per-message content spans.
+    """Build templated history text + input_ids + per-message content spans.
 
-    Qwen3's chat template injects a `<think>\\n\\n</think>\\n\\n` block into the
-    *last* assistant message of the history. Appending an empty trailing user
-    turn and truncating there keeps that injection out of the text entirely.
+    The format comes from the tokenizer (core.chat), which also handles the
+    template quirks -- Qwen3's injected `<think>` block, Llama 3.1's default
+    system preamble -- and asserts the per-message tokens equal the full text's.
 
     Returns (text, input_ids (1, T) tensor, spans) where `spans` is a list of
     (start, end) content-token index ranges (end-exclusive, into input_ids[0]),
     one per message, aligned with `messages`. Content excludes the role-header
-    and `<|im_end|>` tokens.
+    and end-of-message tokens.
     """
-    padded = messages + [{"role": "user", "content": ""}]
-    full_text = tokenizer.apply_chat_template(
-        padded, add_generation_prompt=False, tokenize=False
-    )
-    cut = full_text.rfind("<|im_start|>user")
-    text = full_text[:cut]
-    assert "<think>" not in text, "chat template injected a <think> block unexpectedly"
-
-    full_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-
-    start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-    end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    assert start_id is not None and start_id != tokenizer.unk_token_id, "no <|im_start|> token"
-    assert end_id is not None and end_id != tokenizer.unk_token_id, "no <|im_end|> token"
-
-    concat_ids = []
-    spans = []
-    for msg in messages:
-        role, content = msg["role"], msg["content"]
-        block = f"<|im_start|>{role}\n{content}<|im_end|>\n"
-        block_ids = tokenizer(block, add_special_tokens=False)["input_ids"]
-        assert block_ids[0] == start_id, (role, block_ids[:3])
-
-        header = f"<|im_start|>{role}\n"
-        header_ids = tokenizer(header, add_special_tokens=False)["input_ids"]
-        assert block_ids[: len(header_ids)] == header_ids, (role, "header mismatch")
-
-        end_idx = len(block_ids) - 1 - block_ids[::-1].index(end_id)
-        assert block_ids[end_idx] == end_id
-
-        content_start = len(concat_ids) + len(header_ids)
-        content_end = len(concat_ids) + end_idx
-        spans.append((content_start, content_end))
-
-        concat_ids.extend(block_ids)
-
-    assert concat_ids == full_ids, "concatenated per-message tokens != full templated text tokens"
-
-    input_ids = torch.tensor([full_ids])
-    return text, input_ids, spans
+    text, input_ids, spans = chat.encode(tokenizer, messages)
+    return text, input_ids, [(s.content_start, s.content_end) for s in spans]
 
 
 def evenly_spaced_positions(start, end, k):

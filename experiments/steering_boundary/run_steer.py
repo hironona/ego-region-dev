@@ -29,12 +29,13 @@ import argparse
 
 import numpy as np
 import torch
+from transformers import AutoTokenizer
 
 from core import capture, model as model_mod
 
 from . import config
 from .data import eval_questions
-from .run_capture import ANSWER_INSTRUCTION, PROMPT_STYLE, answer_token_ids, prompt_ids
+from .run_capture import ANSWER_INSTRUCTION, answer_token_ids, prompt_ids, prompt_style
 
 # k=0 is the embedding output, k>=1 the residual stream leaving block k-1.
 # Writing at the hook that *is* hidden_states[k] means the probe, the steering
@@ -183,11 +184,13 @@ def main():
     # the prompt built below. If the two prompts differ, each of them is anchored
     # to a different activation, and the sweep would still produce a
     # plausible-looking plot. This is checked before the model loads: at 8B
-    # loading takes minutes, and the check only needs the sidecar json.
-    assert meta.get("prompt_style") == PROMPT_STYLE, (
+    # loading takes minutes, and the check only needs the sidecar json and the
+    # tokenizer.
+    expected = prompt_style(AutoTokenizer.from_pretrained(args.model))
+    assert meta.get("prompt_style") == expected, (
         f"capture used prompt_style {meta.get('prompt_style')!r}, this build expects "
-        f"{PROMPT_STYLE!r}. Re-run run_capture (FORCE_CAPTURE=1 in the slurm job) "
-        f"and analyze before sweeping."
+        f"{expected!r} for {args.model}. Re-run run_capture (FORCE_CAPTURE=1 in the "
+        f"slurm job) and analyze before sweeping."
     )
     scales = np.asarray(args.scales if args.scales else config.STEER_SCALES, dtype=np.float64)
     layers = list(args.layers)

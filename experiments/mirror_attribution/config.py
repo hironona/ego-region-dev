@@ -11,7 +11,8 @@ conversations, so N_TURNS / SEED / POOL below match speaker_probe's. The
 behavioural eval is a separate dataset (opinions.py): n turns of stated
 opinions, then "who said <statement>, the user or the assistant?".
 
-MODEL_NAME deliberately does not match speaker_probe's 0.6B, for the same
+MODEL_NAME matches speaker_probe's now that both default to Llama-3.1-8B-
+Instruct. On Qwen it deliberately did not (0.6B there, 8B here), for the same
 reason as steering_boundary: a mirror can only move behaviour the unmirrored
 model has, and multi-turn attribution is the kind of task a 0.6B model answers
 near chance. run_mirror prints the unmirrored accuracy first for that reason.
@@ -19,7 +20,7 @@ near chance. run_mirror prints the unmirrored accuracy first for that reason.
 
 from pathlib import Path
 
-MODEL_NAME = "Qwen/Qwen3-8B"  # 36 blocks, d_model 4096
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"  # 32 blocks, 32 heads, d_model 4096
 DEVICE = "auto"  # "mps" | "cpu" | "cuda" | "auto"
 # float32 is the reference numerics; "bfloat16" halves the 32 GB of 8B weights.
 # Pass --dtype on either model-loading script rather than editing this.

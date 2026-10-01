@@ -17,7 +17,7 @@ import argparse
 import numpy as np
 import torch
 
-from core import capture, model as model_mod
+from core import capture, chat, model as model_mod
 from experiments.speaker_probe.conversations import build
 from experiments.speaker_probe.run_capture import build_input, evenly_spaced_positions
 
@@ -30,15 +30,28 @@ ANSWER_INSTRUCTION = "\n\nAnswer with a single word, Yes or No."
 # steering vector, alpha*, the Yes/No readout -- is measured at the last token
 # of that prompt, so a capture built under one style cannot be swept under
 # another. run_steer refuses the mismatch rather than producing a plausible
-# plot from two incompatible halves. Bump this whenever prompt_ids changes.
-PROMPT_STYLE = "qwen3-nothink-generation-prompt"
+# plot from two incompatible halves. Keyed by chat format, so a capture from
+# one model family cannot be swept on another either. Bump the entry whenever
+# prompt_ids changes for that format.
+PROMPT_STYLES = {
+    "qwen3": "qwen3-nothink-generation-prompt",
+    "llama3": "llama3-generation-prompt",
+}
+
+
+def prompt_style(tokenizer):
+    return PROMPT_STYLES[chat.for_tokenizer(tokenizer).name]
 
 
 def prompt_ids(tokenizer, user, system=None):
     """Chat prompt ending where the model's *answer* begins.
 
-    `enable_thinking=False` appends an already-closed `<think>\\n\\n</think>`
-    block to the generation prompt, and that block is the entire point. Qwen3
+    core.chat.prompt applies the format's generation-prompt kwargs and asserts
+    the generation header the format expects. On Llama 3.1 that header is all
+    there is: the answer is the next token.
+
+    On Qwen3 the kwarg is the entire point. `enable_thinking=False` appends an
+    already-closed `<think>\\n\\n</think>` block to the generation prompt. Qwen3
     thinks by default, so without it the next token here is `<think>` at logit
     ~30, the model goes on to reason for hundreds of tokens, and Yes/No sit
     around rank 100k of 151936 carrying a combined probability of 0.0000. An
@@ -50,7 +63,7 @@ def prompt_ids(tokenizer, user, system=None):
     This function previously asserted the opposite, reasoning from the true but
     misleading observation that the default template is textually clean. Clean
     text is not a think-free model: the clean prompt is precisely the one the
-    model answers by starting to think. So the assert below pins the string that
+    model answers by starting to think. So the assert pins the string that
     produces the right *behaviour*, and test_read_position_is_where_the_answer_goes
     pins the behaviour itself -- if a template update ever moves the answer
     somewhere else, that test is what fails.
@@ -58,11 +71,7 @@ def prompt_ids(tokenizer, user, system=None):
     msgs = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": user}
     ]
-    text = tokenizer.apply_chat_template(
-        msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False
-    )
-    assert text.endswith("<think>\n\n</think>\n\n"), repr(text[-40:])
-    return text, torch.tensor([tokenizer(text, add_special_tokens=False)["input_ids"]])
+    return chat.prompt(tokenizer, msgs)
 
 
 def answer_token_ids(tokenizer):
@@ -200,7 +209,7 @@ def main():
         "model": args.model,
         "device": device,
         "dtype": args.dtype,
-        "prompt_style": PROMPT_STYLE,
+        "prompt_style": prompt_style(tokenizer),
         "vector_method": args.vector_method,
         # CAA has no persona prompt: its "trait" is the eval's non-matching answer.
         "trait": args.trait if args.vector_method == "system_prompt" else f"anti-{args.eval_set}",
