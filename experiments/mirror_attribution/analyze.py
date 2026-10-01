@@ -110,7 +110,7 @@ def plot_self_vector(vec, model, out_dir):
 # --- mirror sweep ---------------------------------------------------------
 
 def choices(logp):
-    """1 where the assistant answer (Me/I) beats the user answer (You)."""
+    """1 where the answer "Assistant" beats the answer "User"."""
     return (logp[..., 1] > logp[..., 0]).astype(np.uint8)
 
 
@@ -245,7 +245,7 @@ def plot_mirror(summary, mir, meta, out_dir):
         axes[2, a].plot(layers, s["z_acc_assistant"], "o-", ms=3, color="C1",
                         label="assistant tokens")
         axes[2, a].set(ylim=(0, 1.03), xlabel="mirrored layer k")
-    axes[0, 0].set_ylabel("median P(You)+P(Me)+P(I)")
+    axes[0, 0].set_ylabel("median P(User)+P(Assistant)")
     axes[1, 0].set_ylabel("median |x'-x| / |x|")
     axes[2, 0].set_ylabel("on own side of\nv.x+b=0 (pre-mirror)")
     axes[0, 0].legend(fontsize=6)

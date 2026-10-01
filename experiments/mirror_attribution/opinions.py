@@ -32,11 +32,12 @@ TOPICS = {
 
 QUESTION = (
     'Earlier in our conversation, one of us said: "{statement}" '
-    "Who said that, you or me? Answer with one word: You or Me."
+    "Who said that, the user or the assistant? Answer with one word: User or Assistant."
 )
 
-# Who made the quoted statement. The model answers as the assistant, so a user
-# statement is "You" and an assistant statement is "Me".
+# Who made the quoted statement. The question names the roles rather than
+# asking "you or me?": with the pronouns, Qwen3-8B answered the opposite role
+# on 88% of n=1 items at full answer mass, i.e. it read the deixis backwards.
 LABELS = {0: "user", 1: "assistant"}
 
 

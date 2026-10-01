@@ -12,7 +12,7 @@ builds the opinion dataset, scores the unmirrored model once, then for each
                  along a random unit direction instead (config.RANDOM_CONTROL).
 
 The answer is read as a forced choice at the first answer position: log P of
-"You" (the user said it) against log P of "Me"/"I" (the assistant did). Each
+"User" (the user said it) against log P of "Assistant" (the assistant did). Each
 item stores both log-probs and the answer mass, so analyze can compute
 accuracy, flip rate and margin without a second pass.
 
@@ -31,9 +31,10 @@ from .opinions import build
 
 hook_name = capture.resid_hook_name
 
-# Indexed by label: 0 = the user said it ("You"), 1 = the assistant did. "I" is
-# counted with "Me" because "I did." is the same answer.
-ANSWER_WORDS = (("You",), ("Me", "I"))
+# Indexed by label: 0 = the user said it, 1 = the assistant did. Both cases
+# count, since "user" and "User" are the same answer. Role names, not "You"/"Me":
+# see opinions.QUESTION.
+ANSWER_WORDS = (("User", "user"), ("Assistant", "assistant"))
 GEN_PROMPT = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
@@ -98,7 +99,7 @@ def answer_logp(logits, answer_ids):
     """(log P(label 0 answer), log P(label 1 answer)), answer mass) for one row.
 
     Log-probs under the full softmax, summed over each label's words, so the
-    mass P(You) + P(Me) + P(I) says whether the model is answering at all.
+    mass over all answer words says whether the model is answering at all.
     """
     x = torch.as_tensor(logits, dtype=torch.float64).log_softmax(-1)
     lp = np.array([float(torch.logsumexp(x[ids], 0)) for ids in answer_ids])
@@ -253,7 +254,7 @@ def main():
             "kinds": kinds, "modes": modes, "answer_words": ANSWER_WORDS,
             "min_answer_mass": config.MIN_ANSWER_MASS,
             "label_convention": (
-                "labels: 0=user said it (correct answer You), 1=assistant (Me/I). "
+                "labels: 0=user said it (correct answer User), 1=assistant (Assistant). "
                 "logp[..., 0|1] = log P(label 0|1 answer). "
                 "z_acc[..., 0|1] = fraction of user|assistant history tokens on "
                 "their own side of v.x+b=0 before mirroring."

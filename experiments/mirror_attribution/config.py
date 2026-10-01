@@ -9,7 +9,7 @@ boundary at the midpoint of the two means: p = sigma(v.x + b),
 b = -v.(mu_asst + mu_user)/2. It is fitted on speaker_probe's shared-pool
 conversations, so N_TURNS / SEED / POOL below match speaker_probe's. The
 behavioural eval is a separate dataset (opinions.py): n turns of stated
-opinions, then "who said <statement>, you or me?".
+opinions, then "who said <statement>, the user or the assistant?".
 
 MODEL_NAME deliberately does not match speaker_probe's 0.6B, for the same
 reason as steering_boundary: a mirror can only move behaviour the unmirrored
@@ -63,8 +63,9 @@ MIRROR_MODES = ("history", "assistant", "user")
 # v if it beats this control.
 RANDOM_CONTROL = True
 
-# Cells where the median P(You) + P(Me) + P(I) at the read position falls below
-# this have stopped answering the question; the plots grey them out.
+# Cells where the median P(User) + P(Assistant) (either case) at the read
+# position falls below this have stopped answering the question; the plots grey
+# them out.
 MIN_ANSWER_MASS = 0.5
 
 HERE = Path(__file__).parent

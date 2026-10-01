@@ -169,9 +169,10 @@ uv run python -m experiments.mirror_attribution.analyze
 3. **run_mirror** → `mirror.npz`. For each n in `{1, 2, 4, 8}` it builds 60 opinion
    conversations (`opinions.py`). In each, the user and the assistant state different opinions
    on one topic per turn, in the same first-person sentence. A final user message then
-   quotes one statement: *"Who said that, you or me? Answer with one word: You or Me."* The
-   answer is a forced choice read at the first answer position: log P(You) against log
-   P(Me) + P(I), with `enable_thinking=False`. Every item is run once without the hook, then
+   quotes one statement: *"Who said that, the user or the assistant? Answer with one word: User or Assistant."*
+   The answer is a forced choice read at the first answer position: log P(User) against
+   log P(Assistant), either case, with `enable_thinking=False`. (A "you or me?" wording made
+   8B answer the opposite role on 88% of items, so the question names the roles.) Every item is run once without the hook, then
    once per cell of layer k × mode × kind:
    - modes: `history` (every history token), `assistant` or `user` (that role's blocks only).
      Position 0 and the question are never touched.
