@@ -25,6 +25,7 @@ network once (see [Cluster runs](#cluster-runs) if the compute node has none).
 | `mean_ablation_probe` | which blocks write it? | attention blocks 0–4 |
 | `head_ablation_sweep` | which heads? | per-head sweep over that window |
 | `steering_boundary` | does trait steering bend near the probe's boundary `w·h + b = 0`? | open — see `docs/HANDOFF.md` |
+| `mirror_attribution` | is speaker one difference-in-means direction, and does mirroring the history across its boundary make the model misattribute who said what? | not yet run |
 
 ## Running a pipeline
 
@@ -146,6 +147,47 @@ The pipeline job runs all four steps offline (`HF_HUB_OFFLINE=1`) and reuses an 
 `capture.npz`. Knobs go through `--export`: `FORCE_CAPTURE=1` (required after a prompt
 change), `DTYPE=bfloat16`, `STEER_ARGS="--layers 18 --n-eval 30"`.
 
+### mirror_attribution
+
+Four steps on `Qwen3-8B`, the same shape as `steering_boundary`. `analyze` runs before and
+after the mirror sweep.
+
+```bash
+uv run python -m experiments.mirror_attribution.run_capture --device cuda
+uv run python -m experiments.mirror_attribution.analyze
+uv run python -m experiments.mirror_attribution.run_mirror --device cuda
+uv run python -m experiments.mirror_attribution.analyze
+```
+
+1. **run_capture** → `capture.npz` (~485 MB): content tokens of speaker_probe's shared-pool
+   conversations (40 × 20 messages × 2 tokens), every layer. Knobs: `--n`,
+   `--tokens-per-turn`, `--dtype bfloat16`.
+2. **analyze** → `vectors.npz` with `v_k = μ_asst − μ_user` and the midpoint bias
+   `b_k = −v_k·(μ_asst+μ_user)/2`. Also writes `self_vector.png`, which shows the held-out
+   balanced accuracy of `p = σ(v·x + b)` per layer, compared with the bias-free `σ(v·x)`
+   and the full logistic probe, plus `cos(v, w)`.
+3. **run_mirror** → `mirror.npz`. For each n in `{1, 2, 4, 8}` it builds 60 opinion
+   conversations (`opinions.py`). In each, the user and the assistant state different opinions
+   on one topic per turn, in the same first-person sentence. A final user message then
+   quotes one statement: *"Who said that, you or me? Answer with one word: You or Me."* The
+   answer is a forced choice read at the first answer position: log P(You) against log
+   P(Me) + P(I), with `enable_thinking=False`. Every item is run once without the hook, then
+   once per cell of layer k × mode × kind:
+   - modes: `history` (every history token), `assistant` or `user` (that role's blocks only).
+     Position 0 and the question are never touched.
+   - kinds: `self` is the Householder reflection `x' = x − 2(v·x+b)/|v|²·v`; `random` pushes
+     each token by the same distance along a random direction.
+
+   Knobs: `--turns`, `--n-eval`, `--layers`, `--modes`, `--no-control`, `--dtype`.
+4. **analyze** again → `mirror_accuracy.png` (self vs random vs unmirrored; for `history`, a
+   full swap would reach 1 − unmirrored), `mirror_by_label.png` (split by who really said
+   it), `mirror_validity.png` (answer mass, `|x'−x|/|x|`, and whether the reflected tokens
+   were on their own side of the boundary to begin with; check this first), and
+   `results.json`.
+
+run_mirror prints the unmirrored accuracy for each n first. If that is near chance, nothing
+the mirror does at that n means anything.
+
 ## Outputs
 
 Everything lands in `experiments/<name>/outputs/` (gitignored): captures plus `plots/*.png`
@@ -165,9 +207,9 @@ sidecar `.meta.json` records the templated text, token strings and label positio
 uv run python test_pipeline.py
 ```
 
-12 checks covering npz round-trip, capture shapes, the two Qwen3 `<think>` template
+15 checks covering npz round-trip, capture shapes, the two Qwen3 `<think>` template
 quirks, the lexical-confound control, and that each intervention touches exactly the
-tokens it claims to. Several load the model on CPU, so it is not instant.
+tokens it claims to (including the attribution prompt's role mask and the reflection hook). Several load the model on CPU, so it is not instant.
 
 ## More
 

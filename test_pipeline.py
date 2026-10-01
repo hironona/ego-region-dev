@@ -438,6 +438,88 @@ def test_capture_shapes():
     assert np.allclose(np.triu(a["attentions"], k=1), 0.0)
 
 
+def test_attribution_prompt_roles_are_exact():
+    """The mirror is only as targeted as the role mask it is given.
+
+    Every history token must carry its block's role, the question and generation
+    prompt must carry none, the read position must sit after the pre-closed think
+    block, and no mode may touch position 0 or the question. Each quoted
+    statement must also occur exactly once in its history, or the item has no
+    single correct answer.
+    """
+    from experiments.mirror_attribution.opinions import build
+    from experiments.mirror_attribution.run_mirror import (
+        GEN_PROMPT,
+        answer_token_ids,
+        build_prompt,
+        mode_positions,
+    )
+
+    tok = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    answer_token_ids(tok)  # each answer word is one distinct token
+    items = build(40, 4, seed=0)
+    assert sum(it["label"] for it in items) == 20
+    for it in items:
+        history = [m["content"] for m in it["messages"]]
+        assert history.count(it["statement"]) == 1, it
+        assert it["statement"] in it["question"]
+
+        ids, role = build_prompt(tok, it)
+        ids = ids[0].tolist()
+        assert len(ids) == len(role)
+        assert tok.decode(ids).endswith(GEN_PROMPT)
+        for r, who in ((0, "user"), (1, "assistant")):
+            text = tok.decode([i for i, x in zip(ids, role) if x == r])
+            assert text.count(f"<|im_start|>{who}\n") == 4, (who, text)
+            for m in it["messages"]:
+                assert (m["content"] in text) == (m["role"] == who)
+        q_start = int(np.flatnonzero(role == -1)[0])
+        assert (role[q_start:] == -1).all() and (role[:q_start] >= 0).all()
+        assert it["question"] in tok.decode(ids[q_start:])
+
+        hist = mode_positions(role, "history")
+        assert hist[0] == 1 and hist[-1] == q_start - 1 and len(hist) == q_start - 1
+        u, a = mode_positions(role, "user"), mode_positions(role, "assistant")
+        assert not set(u) & set(a) and sorted(np.r_[u, a]) == list(hist)
+
+
+def test_mirror_hook_reflects_exactly():
+    """The reflection must negate z = v.x + b at the touched positions, keep the
+    component orthogonal to v, undo itself when applied twice, and leave every
+    other position bit-identical. The random control must move each token by
+    exactly the same distance, or it is not a matched control.
+    """
+    from experiments.mirror_attribution.run_mirror import mirror_hook
+
+    g = torch.Generator().manual_seed(0)
+    act = torch.randn(1, 9, 16, generator=g) * 3 + 1
+    v = torch.randn(16, generator=g)
+    b = 0.7
+    pos = np.array([1, 2, 5])
+    rest = np.setdiff1d(np.arange(9), pos)
+
+    stats = {"z": [], "disp": []}
+    out = mirror_hook(pos, v, b, stats=stats)(act, None)
+    z0, z1 = act[0] @ v + b, out[0] @ v + b
+    assert torch.allclose(z1[pos], -z0[pos], atol=1e-4)
+    assert torch.equal(out[0, rest], act[0, rest])
+    perp = lambda x: x - (x @ v)[:, None] * v / (v @ v)  # noqa: E731
+    assert torch.allclose(perp(out[0, pos]), perp(act[0, pos]), atol=1e-4)
+    twice = mirror_hook(pos, v, b)(out, None)
+    assert torch.allclose(twice, act, atol=1e-4)
+    assert np.allclose(stats["z"][0], z0[pos].numpy(), atol=1e-4)
+
+    r = torch.randn(16, generator=g)
+    r = r / r.norm()
+    ctrl = mirror_hook(pos, v, b, push=r)(act, None)
+    assert torch.allclose((ctrl - act)[0, pos].norm(dim=-1), (out - act)[0, pos].norm(dim=-1),
+                          atol=1e-4)
+    assert torch.equal(ctrl[0, rest], act[0, rest])
+
+    # a bfloat16 model must get a bfloat16 stream back
+    assert mirror_hook(pos, v, b)(act.bfloat16(), None).dtype == torch.bfloat16
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -22,6 +22,7 @@ Current experiments, in the order they were built:
 | `mean_ablation_probe` | which blocks write that signal? mean-ablate a sliding attn/MLP window and re-probe | — |
 | `head_ablation_sweep` | narrows the implicated window to individual heads (`hook_z`) | — |
 | `steering_boundary` | does a trait steering vector start changing behaviour near the probe's boundary? | `data.py` (CAA answer pairs, legacy trait prompts, anthropics/evals), `run_steer.py` (second model-loading step) |
+| `mirror_attribution` | does reflecting the history across the self vector's boundary (`v = μ_asst − μ_user`, fitted on speaker_probe's conversations) make the model misattribute who said what? | `opinions.py` (n-turn opinion conversations + "who said it, you or me?"), `run_mirror.py` (second model-loading step: reflection hook + forced-choice You/Me readout) |
 
 `docs/HANDOFF.md` is the running research log: what has actually been measured, what is
 still unverified, and the open items. Read it before drawing conclusions from any plot.
@@ -36,7 +37,8 @@ keep prompt/role/analysis choices in the experiment.
 ## Rules that matter
 
 - **Capture and analysis are separate processes.** `run_capture.py` (and
-  `steering_boundary/run_steer.py`) are the only things that load the model;
+  `steering_boundary/run_steer.py`, `mirror_attribution/run_mirror.py`) are the only
+  things that load the model;
   `analyze.py` reads the `.npz` only, so plots can be regenerated without a forward
   pass. Keep it that way.
 - **`config.py` is copied, not shared.** Every experiment holds its own `MODEL_NAME`,
@@ -45,7 +47,8 @@ keep prompt/role/analysis choices in the experiment.
   be comparable across experiments, because the dataset builder is shared.
 - **Code may be reused across experiments; config may not.** Later experiments import
   `speaker_probe.conversations.build`, `speaker_probe.run_capture.build_input`, and
-  `speaker_probe.analyze.{probe_accuracy, conv_train_test_masks}` — that is deliberate,
+  `speaker_probe.analyze.{probe_accuracy, conv_train_test_masks}` (and `mirror_attribution` reuses
+  `steering_boundary.analyze.fit_speaker_boundary` for the raw-space probe) — that is deliberate,
   so "the probe" means one implementation. `speaker_probe` itself imports from nobody.
 - **One layer index, everywhere: `hidden_states[k]`.** `k=0` is the embedding output,
   `k>=1` is the residual stream leaving block `k-1` (last row is pre-final-norm). Probe,
